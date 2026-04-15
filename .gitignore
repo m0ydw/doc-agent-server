@@ -1,0 +1,27 @@
+# 1. 环境变量（必须忽略）
+.env
+.env.local
+.env.*.local
+
+# 2. 依赖目录（必须忽略）
+node_modules/
+
+# 3. 锁文件 ✅ 保留！不要忽略！
+# pnpm-lock.yaml   （不要写！）
+# package-lock.json（不要写！）
+
+# 4. 构建产物
+dist/
+build/
+coverage/
+.cache/
+
+# 5. 日志
+logs/
+*.log
+
+# 6. 系统/IDE
+.DS_Store
+.idea/
+.vscode/
+*.sw*
