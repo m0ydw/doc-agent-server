@@ -1,13 +1,26 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+
+function decodeFilename(filename) {
+  if (!filename) return filename;
+  try {
+    const buffer = Buffer.from(filename, "binary");
+    return buffer.toString("utf8");
+  } catch {
+    return filename;
+  }
+}
+
 const {
   saveDocument,
   getDocumentList,
   getDocumentFile,
+  getDocumentById,
   deleteDocument,
   cleanupDocuments,
   createSSEHandler,
+  emitFileDeleted,
 } = require("../services/docServices");
 
 const router = express.Router();
@@ -28,7 +41,12 @@ router.post("/cleanup", async (req, res) => {
   }
 });
 
-const storage = multer.memoryStorage();
+const storage = multer.memoryStorage({
+  filename: (req, file, cb) => {
+    const decodedName = decodeFilename(file.originalname);
+    cb(null, decodedName);
+  },
+});
 
 const fileFilter = (req, file, cb) => {
   const allowedTypes = [
@@ -149,10 +167,15 @@ router.get("/:id/info", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
+    const doc = getDocumentById(id);
     const success = deleteDocument(id);
 
     if (!success) {
       return res.status(404).json({ error: "文件不存在" });
+    }
+
+    if (doc) {
+      emitFileDeleted({ fileId: id, fileName: doc.originalName });
     }
 
     res.json({

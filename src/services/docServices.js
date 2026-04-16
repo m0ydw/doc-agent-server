@@ -39,7 +39,7 @@ function saveDocument(file) {
   };
 
   const metadataPath = path.join(UPLOAD_DIR, `${fileId}.json`);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
   return metadata;
 }
@@ -55,7 +55,7 @@ function updateDocument(id, fileBuffer) {
 
   metadata.uploadedAt = new Date().toISOString();
   const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
   docEmitter.emit("file_updated", { fileId: id, fileName: metadata.originalName });
 
@@ -72,12 +72,22 @@ function createSSEHandler(req, res) {
     res.write(`event: file_updated\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
+  const onFileDeleted = (data) => {
+    res.write(`event: file_deleted\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
   docEmitter.on("file_updated", onFileUpdated);
+  docEmitter.on("file_deleted", onFileDeleted);
 
   req.on("close", () => {
     docEmitter.off("file_updated", onFileUpdated);
+    docEmitter.off("file_deleted", onFileDeleted);
     res.end();
   });
+}
+
+function emitFileDeleted(data) {
+  docEmitter.emit("file_deleted", data);
 }
 
 function getDocumentList() {
@@ -188,6 +198,7 @@ module.exports = {
   deleteDocument,
   cleanupDocuments,
   createSSEHandler,
+  emitFileDeleted,
   docEmitter,
   UPLOAD_DIR,
 };
