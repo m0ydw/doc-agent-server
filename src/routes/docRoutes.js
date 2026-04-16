@@ -6,12 +6,27 @@ const {
   getDocumentList,
   getDocumentFile,
   deleteDocument,
+  cleanupDocuments,
   createSSEHandler,
 } = require("../services/docServices");
 
 const router = express.Router();
 
 router.get("/events", createSSEHandler);
+
+router.post("/cleanup", async (req, res) => {
+  try {
+    const { keepIds } = req.body;
+    if (!Array.isArray(keepIds)) {
+      return res.status(400).json({ error: "keepIds 必须是数组" });
+    }
+    const deleted = cleanupDocuments(keepIds);
+    res.json({ success: true, message: "清理完成", deleted });
+  } catch (error) {
+    console.error("清理文件失败:", error);
+    res.status(500).json({ error: "清理文件失败" });
+  }
+});
 
 const storage = multer.memoryStorage();
 

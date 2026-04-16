@@ -157,13 +157,36 @@ function deleteDocument(id) {
   return true;
 }
 
+function cleanupDocuments(keepIds) {
+  const allDocs = getDocumentList();
+  let deletedCount = 0;
+
+  for (const doc of allDocs) {
+    if (!keepIds.includes(doc.id)) {
+      const filePath = path.join(UPLOAD_DIR, doc.storedName);
+      const metadataPath = path.join(UPLOAD_DIR, `${doc.id}.json`);
+
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      if (fs.existsSync(metadataPath)) {
+        fs.unlinkSync(metadataPath);
+      }
+      deletedCount++;
+      console.log(`清理文件: ${doc.originalName} (${doc.id})`);
+    }
+  }
+
+  return deletedCount;
+}
+
 module.exports = {
   saveDocument,
   getDocumentList,
   getDocumentById,
   getDocumentFile,
   deleteDocument,
-  updateDocument,
+  cleanupDocuments,
   createSSEHandler,
   docEmitter,
   UPLOAD_DIR,
