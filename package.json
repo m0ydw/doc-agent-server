@@ -1,6 +1,12 @@
 {
+	"scripts": {
+		"dev": "node src/server.js"
+	},
 	"dependencies": {
+		"axios": "^1.14.0",
+		"dotenv": "^17.4.2",
 		"express": "^5.2.1",
-		"axios": "^1.14.0"
+		"multer": "^2.1.1",
+		"uuid": "^13.0.0"
 	}
 }
