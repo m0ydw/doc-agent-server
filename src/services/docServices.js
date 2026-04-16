@@ -26,6 +26,7 @@ function saveDocument(file) {
   const storedFilename = `${fileId}${ext}`;
   const filePath = path.join(UPLOAD_DIR, storedFilename);
 
+  console.log("saveDocument 收到文件名:", file.originalname);
   fs.writeFileSync(filePath, file.buffer);
 
   const metadata = {

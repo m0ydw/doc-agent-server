@@ -5,6 +5,8 @@ const path = require("path");
 function decodeFilename(filename) {
   if (!filename) return filename;
   try {
+    const decoded = decodeURIComponent(filename);
+    if (decoded !== filename) return decoded;
     const buffer = Buffer.from(filename, "binary");
     return buffer.toString("utf8");
   } catch {
@@ -41,12 +43,7 @@ router.post("/cleanup", async (req, res) => {
   }
 });
 
-const storage = multer.memoryStorage({
-  filename: (req, file, cb) => {
-    const decodedName = decodeFilename(file.originalname);
-    cb(null, decodedName);
-  },
-});
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   const allowedTypes = [
@@ -56,6 +53,7 @@ const fileFilter = (req, file, cb) => {
   const allowedExtensions = [".docx", ".doc"];
 
   const ext = path.extname(file.originalname).toLowerCase();
+  console.log("fileFilter: ext=", ext);
 
   if (
     allowedTypes.includes(file.mimetype) ||
@@ -82,12 +80,8 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
     }
 
     req.files.forEach((file) => {
-      console.log("收到文件:", {
-        originalName: file.originalname,
-        size: file.size,
-        mimetype: file.mimetype,
-        encoding: file.encoding,
-      });
+      const decodedName = decodeFilename(file.originalname);
+      file.originalname = decodedName;
     });
 
     const results = req.files.map((file) => saveDocument(file));
@@ -99,7 +93,7 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
     });
   } catch (error) {
     console.error("上传文件失败:", error);
-    res.status(500).json({ error: error.message || "上传文件失败" });
+    res.status(500).json({ error: error.message });
   }
 });
 
