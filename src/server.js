@@ -5,6 +5,7 @@ const config = require("./config");
 // 引入 app
 const app = require("./app");
 const docRoutes = require("./routes/docRoutes");
+const docOperationsRoutes = require("./routes/docOperationsRoutes");
 const { UPLOAD_DIR } = require("./services/docServices");
 
 // 静态文件服务 - 提供上传文件的访问
@@ -12,6 +13,10 @@ app.use("/uploads", express.static(UPLOAD_DIR));
 
 // ------------ 文档管理路由 ------------
 app.use("/api/docs", docRoutes);
+// -------------------------------------------
+
+// ------------ 文档操作路由 ------------
+app.use("/api/doc-operations", docOperationsRoutes);
 // -------------------------------------------
 
 // 从 config 里拿端口 ✅
