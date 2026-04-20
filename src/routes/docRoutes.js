@@ -29,12 +29,17 @@ const router = express.Router();
 
 router.get("/events", createSSEHandler);
 
+const sessionManager = require("../services/session");
+
 router.post("/cleanup", async (req, res) => {
   try {
     const { keepIds } = req.body;
     if (!Array.isArray(keepIds)) {
       return res.status(400).json({ error: "keepIds 必须是数组" });
     }
+    // 先保存所有会话
+    await sessionManager.closeAllSessions();
+    // 再清理文件
     const deleted = cleanupDocuments(keepIds);
     res.json({ success: true, message: "清理完成", deleted });
   } catch (error) {
