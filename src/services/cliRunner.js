@@ -1,7 +1,12 @@
 const path = require("path");
+const Y = require("yjs");
+const { HocuspocusProvider } = require("@hocuspocus/provider");
 
 // 文档目录
 const DOCS_DIR = path.join(__dirname, "../../uploads");
+
+// Yjs 文档存储（每个 docId 对应一个 Y.Doc）
+const yDocs = new Map();
 
 // SDK 客户端（单例）
 let client = null;
@@ -48,11 +53,34 @@ async function disposeClient() {
 async function openDocument(docPath, sessionId) {
   const sdkClient = await getClient();
   
-  // 使用 sessionId 如果提供
-  const options = sessionId ? { session: sessionId } : {};
-  const doc = await sdkClient.open({ doc: docPath, ...options });
+  // 从路径中提取 docId
+  const docId = path.basename(docPath, ".docx");
   
-  console.log(`[SDK] Document opened: ${docPath}`);
+  // 获取或创建 Yjs 文档
+  let yDoc = yDocs.get(docId);
+  if (!yDoc) {
+    yDoc = new Y.Doc();
+    yDocs.set(docId, yDoc);
+  }
+  
+  // 创建 Hocuspocus Provider
+  const provider = new HocuspocusProvider({
+    url: `ws://localhost:1234/hocuspocus`,
+    name: docId,  // 使用 docId 作为房间名
+    document: yDoc,
+    connect: true,
+  });
+  
+  // 使用 sessionId 如果提供，并将 Yjs provider 传递给 SDK
+  const options = sessionId ? { session: sessionId } : {};
+  const doc = await sdkClient.open({ 
+    doc: docPath, 
+    ...options,
+    ydoc: yDoc,
+    provider: provider,
+  });
+  
+  console.log(`[SDK] Document opened with Yjs collaboration: ${docPath}`);
   return doc;
 }
 
