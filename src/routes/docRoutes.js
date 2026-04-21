@@ -119,6 +119,9 @@ router.get("/list", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
+
+    // Hocuspocus Server 自动管理 Yjs 文档，不需要手动创建
+
     const result = getDocumentFile(id);
 
     if (!result) {

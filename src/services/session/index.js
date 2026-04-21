@@ -7,4 +7,5 @@ module.exports = {
   getSession: sessionManager.getSession,
   hasSession: sessionManager.hasSession,
   getActiveSessionDocIds: sessionManager.getActiveSessionDocIds,
+  ensureYjsRoom: sessionManager.ensureYjsRoom,
 };

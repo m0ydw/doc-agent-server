@@ -137,6 +137,25 @@ function hasSession(docId) {
 }
 
 /**
+ * 确保 Yjs 协作 Room 已创建
+ * 在前端连接前调用，确保 room 已存在
+ * @param {string} docId - 文档 ID
+ * @returns {Promise<void>}
+ */
+async function ensureYjsRoom(docId) {
+  // 如果会话已存在，直接返回
+  if (sessions.has(docId)) {
+    console.log(`[SessionManager] Yjs Room 已存在: ${docId}`);
+    return;
+  }
+
+  // 创建新会话（同时创建 Yjs provider）
+  console.log(`[SessionManager] 创建 Yjs Room: ${docId}`);
+  await createOrUseSession(docId);
+  console.log(`[SessionManager] Yjs Room 已就绪: ${docId}`);
+}
+
+/**
  * 获取所有活跃会话的文档 ID 列表
  * @returns {string[]}
  */
@@ -153,4 +172,5 @@ module.exports = {
   getSession,
   hasSession,
   getActiveSessionDocIds,
+  ensureYjsRoom,
 };

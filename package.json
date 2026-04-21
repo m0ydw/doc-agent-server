@@ -3,6 +3,7 @@
     "dev": "console-ninja node src/server.js"
   },
   "dependencies": {
+    "@hocuspocus/extension-database": "^3.4.4",
     "@hocuspocus/provider": "^3.4.4",
     "@hocuspocus/server": "^3.4.4",
     "@superdoc-dev/sdk": "^1.5.1",
