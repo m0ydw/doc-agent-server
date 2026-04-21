@@ -27,7 +27,8 @@ async function findText(docId, pattern) {
       require: "any",
     });
 
-    if (!result.ok || !result.items || result.items.length === 0) {
+    // SDK 返回结构：无 ok 字段，直接通过 items 判断
+    if (!result.items || result.items.length === 0) {
       console.log(`[Editor] 查询文本: "${pattern}" - 未找到匹配`);
       return [];
     }
@@ -73,11 +74,8 @@ async function replaceFirst(docId, targetText, replacement) {
       require: "first",
     });
 
-    if (
-      !matchResult.ok ||
-      !matchResult.items ||
-      matchResult.items.length === 0
-    ) {
+    // SDK 返回结构：无 ok 字段，直接通过 items 判断
+    if (!matchResult.items || matchResult.items.length === 0) {
       throw new Error("未找到匹配内容");
     }
 
@@ -135,11 +133,8 @@ async function replaceAll(docId, targetText, replacement) {
       require: "any",
     });
 
-    if (
-      !matchResult.ok ||
-      !matchResult.items ||
-      matchResult.items.length === 0
-    ) {
+    // SDK 返回结构：无 ok 字段，直接通过 items 判断
+    if (!matchResult.items || matchResult.items.length === 0) {
       return { success: true, replaced: 0 };
     }
 

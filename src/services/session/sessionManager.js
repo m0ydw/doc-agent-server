@@ -7,6 +7,7 @@ const {
   saveDocument, 
   DOCS_DIR 
 } = require("../cliRunner");
+const { docEmitter, getDocumentById } = require("../docServices");
 
 /**
  * 活跃会话存储
@@ -71,6 +72,13 @@ async function closeSessionByDocId(docId) {
 
   try {
     await saveDocument(session.doc, { inPlace: true });
+    
+    // 保存成功后触发前端刷新通知
+    const metadata = getDocumentById(docId);
+    if (metadata) {
+      docEmitter.emit("file_updated", { fileId: docId, fileName: metadata.originalName });
+      console.log(`[SessionManager] 触发文件更新通知: ${metadata.originalName}`);
+    }
   } catch (e) {
     console.error(`[SessionManager] 保存失败: ${e.message}`);
   }
@@ -82,6 +90,34 @@ async function closeSessionByDocId(docId) {
   }
 
   sessions.delete(docId);
+}
+
+/**
+ * 保存会话（不关闭会话）
+ * @param {string} docId - 文档 ID
+ */
+async function saveSession(docId) {
+  const session = sessions.get(docId);
+  if (!session) {
+    console.log(`[SessionManager] 会话不存在: ${docId}`);
+    return;
+  }
+
+  console.log(`[SessionManager] 保存会话: ${session.sessionId} for ${docId}`);
+
+  try {
+    await saveDocument(session.doc, { inPlace: true });
+    
+    // 保存成功后触发前端刷新通知
+    const metadata = getDocumentById(docId);
+    if (metadata) {
+      docEmitter.emit("file_updated", { fileId: docId, fileName: metadata.originalName });
+      console.log(`[SessionManager] 触发文件更新通知: ${metadata.originalName}`);
+    }
+  } catch (e) {
+    console.error(`[SessionManager] 保存失败: ${e.message}`);
+    throw e;
+  }
 }
 
 /**
@@ -132,6 +168,7 @@ module.exports = {
   createOrUseSession,
   getSessionDoc,
   closeSessionByDocId,
+  saveSession,
   closeAllSessions,
   getSession,
   hasSession,

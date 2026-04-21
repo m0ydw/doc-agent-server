@@ -2,7 +2,7 @@ const sessionManager = require("./sessionManager");
 
 module.exports = {
   createOrUseSession: sessionManager.createOrUseSession,
-  closeSession: sessionManager.closeSessionByDocId,
+  saveSession: sessionManager.saveSession,
   closeAllSessions: sessionManager.closeAllSessions,
   getSession: sessionManager.getSession,
   hasSession: sessionManager.hasSession,
