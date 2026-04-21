@@ -32,6 +32,12 @@ importers:
       uuid:
         specifier: ^13.0.0
         version: 13.0.0
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
+      yjs:
+        specifier: ^13.6.30
+        version: 13.6.30
 
 packages:
 

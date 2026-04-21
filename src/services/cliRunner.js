@@ -65,10 +65,9 @@ async function openDocument(docPath, sessionId) {
   
   // 创建 Hocuspocus Provider
   const provider = new HocuspocusProvider({
-    url: `ws://localhost:1234/hocuspocus`,
+    url: `ws://localhost:1234`,
     name: docId,  // 使用 docId 作为房间名
     document: yDoc,
-    connect: true,
   });
   
   // 使用 sessionId 如果提供，并将 Yjs provider 传递给 SDK

@@ -74,6 +74,18 @@ router.get("/info/:id", async (req, res) => {
   }
 });
 
+// 保存文档（触发 Yjs 同步）
+router.post("/save/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await sessionManager.saveDocumentById(id);
+    res.json({ success: true, message: "文档已保存" });
+  } catch (error) {
+    console.error("保存失败:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 保存并关闭所有会话（供 cleanup 时调用，不暴露给前端）
 router.post("/save-all-sessions", async (req, res) => {
   try {

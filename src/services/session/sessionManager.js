@@ -79,6 +79,28 @@ async function closeSessionByDocId(docId) {
 }
 
 /**
+ * 保存文档（触发 Yjs 同步）
+ * @param {string} docId - 文档 ID
+ */
+async function saveDocumentById(docId) {
+  const session = sessions.get(docId);
+  if (!session) {
+    console.log(`[SessionManager] 会话不存在: ${docId}`);
+    throw new Error("会话不存在");
+  }
+
+  console.log(`[SessionManager] 保存文档: ${session.sessionId} for ${docId}`);
+
+  try {
+    await saveDocument(session.doc, { inPlace: true });
+    console.log(`[SessionManager] 文档已保存，Yjs 同步触发`);
+  } catch (e) {
+    console.error(`[SessionManager] 保存失败: ${e.message}`);
+    throw e;
+  }
+}
+
+/**
  * 关闭所有会话
  */
 async function closeAllSessions() {
@@ -126,6 +148,7 @@ module.exports = {
   createOrUseSession,
   getSessionDoc,
   closeSessionByDocId,
+  saveDocumentById,
   closeAllSessions,
   getSession,
   hasSession,

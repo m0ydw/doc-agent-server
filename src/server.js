@@ -1,5 +1,6 @@
 // 引入 config（统一读取配置）
 const express = require("express");
+const http = require("http");
 const config = require("./config");
 const { Server } = require("@hocuspocus/server");
 
@@ -24,31 +25,18 @@ app.use("/api/doc-operations", docOperationsRoutes);
 const PORT = config.PORT;
 
 // 启动 HTTP 服务
-const server = app.listen(PORT, () => {
+app.listen(PORT, () => {
   console.log("Node 后端已启动");
   console.log(`地址：http://localhost:${PORT}`);
   console.log(`对接 Python AI：${config.PYTHON_API_URL}`);
 });
 
-// ------------ Hocuspocus Yjs WebSocket 服务 ------------
-const hocuspocusServer = Server.listen({
+// ------------ Hocuspocus Yjs WebSocket 服务（独立端口）------------
+const hocuspocus = new Server({
   port: 1234,
-  name: "superdoc-collaboration",
-  extensions: [],
-  async onLoadDocument(data) {
-    // 从文件加载文档初始化 Yjs（可选）
-    return data.document;
-  },
 });
 
-// 启动 Hocuspocus 服务
-server.on("upgrade", (request, socket, head) => {
-  // 只有 /hocuspocus 路径的请求才转发到 Hocuspocus
-  if (request.url.startsWith("/hocuspocus")) {
-    hocuspocusServer.handleUpgrade(request, socket, head);
-  }
-});
-
+hocuspocus.listen();
 console.log("Hocuspocus Yjs 服务已启动");
-console.log("协作地址：ws://localhost:1234/hocuspocus");
+console.log("协作地址：ws://localhost:1234");
 // -------------------------------------------------
