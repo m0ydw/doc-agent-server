@@ -1,23 +1,30 @@
 const path = require("path");
-const { openWithSession, closeSession, saveSession, DOCS_DIR } = require("../cliRunner");
+const { 
+  getClient, 
+  disposeClient,
+  openDocument, 
+  closeDocument, 
+  saveDocument, 
+  DOCS_DIR 
+} = require("../cliRunner");
 
 /**
  * 活跃会话存储
- * 结构: Map<docId, { sessionId, docPath, createdAt }>
+ * 结构: Map<docId, { sessionId, doc, docPath, createdAt }>
  */
 const sessions = new Map();
 
 /**
  * 创建或使用已有会话
  * @param {string} docId - 文档 ID（不含 .docx 后缀）
- * @returns {Promise<string>} - sessionId
+ * @returns {Promise<object>} - { sessionId, doc }
  */
 async function createOrUseSession(docId) {
   // 检查会话是否已存在
   if (sessions.has(docId)) {
     const session = sessions.get(docId);
     console.log(`[SessionManager] 使用已有会话: ${session.sessionId} for ${docId}`);
-    return session.sessionId;
+    return { sessionId: session.sessionId, doc: session.doc };
   }
 
   // 创建新会话
@@ -26,15 +33,27 @@ async function createOrUseSession(docId) {
 
   console.log(`[SessionManager] 创建新会话: ${sessionId} for ${docId}`);
 
-  await openWithSession(docPath, sessionId);
+  // 使用 SDK 打开文档
+  const doc = await openDocument(docPath, sessionId);
 
   sessions.set(docId, {
     sessionId,
+    doc,
     docPath,
     createdAt: Date.now(),
   });
 
-  return sessionId;
+  return { sessionId, doc };
+}
+
+/**
+ * 获取会话的文档对象
+ * @param {string} docId - 文档 ID
+ * @returns {object|null} - 文档对象
+ */
+function getSessionDoc(docId) {
+  const session = sessions.get(docId);
+  return session ? session.doc : null;
 }
 
 /**
@@ -51,13 +70,13 @@ async function closeSessionByDocId(docId) {
   console.log(`[SessionManager] 关闭会话: ${session.sessionId} for ${docId}`);
 
   try {
-    await saveSession(session.sessionId);
+    await saveDocument(session.doc, { inPlace: true });
   } catch (e) {
     console.error(`[SessionManager] 保存失败: ${e.message}`);
   }
 
   try {
-    await closeSession(session.sessionId);
+    await closeDocument(session.doc);
   } catch (e) {
     console.error(`[SessionManager] 关闭失败: ${e.message}`);
   }
@@ -76,6 +95,9 @@ async function closeAllSessions() {
   for (const docId of docIds) {
     await closeSessionByDocId(docId);
   }
+
+  // 关闭 SDK 客户端
+  await disposeClient();
 
   console.log(`[SessionManager] 所有会话已关闭`);
 }
@@ -108,6 +130,7 @@ function getActiveSessionDocIds() {
 
 module.exports = {
   createOrUseSession,
+  getSessionDoc,
   closeSessionByDocId,
   closeAllSessions,
   getSession,

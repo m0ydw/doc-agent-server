@@ -4,7 +4,7 @@
  */
 
 const sessionManager = require("../session");
-const { runQuery, DOCS_DIR } = require("../cliRunner");
+const { DOCS_DIR } = require("../cliRunner");
 const fs = require("fs");
 const path = require("path");
 

@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "dev": "node src/server.js"
+    "dev": "console-ninja node src/server.js"
   },
   "dependencies": {
     "@superdoc-dev/sdk": "^1.5.1",

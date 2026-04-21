@@ -1,6 +1,6 @@
 const fs = require("fs");
 const path = require("path");
-const { DOCS_DIR, runCommand, runQuery } = require("../cliRunner");
+const { DOCS_DIR, getText, getInfo } = require("../cliRunner");
 const sessionManager = require("../session");
 
 /**
@@ -10,45 +10,40 @@ const sessionManager = require("../session");
  * @returns {Promise<array>} - 匹配位置数组
  */
 async function findText(docId, pattern) {
+  console.log(`查询内容${pattern}`);
   const docPath = path.join(DOCS_DIR, `${docId}.docx`);
   if (!fs.existsSync(docPath)) {
     throw new Error("文档不存在");
   }
 
   try {
-    const sessionId = await sessionManager.createOrUseSession(docId);
+    const { doc } = await sessionManager.createOrUseSession(docId);
 
-    const selectJson = JSON.stringify({
-      type: "text",
-      pattern: pattern,
+    const result = await doc.query.match({
+      select: {
+        type: "text",
+        pattern: pattern,
+      },
+      require: "any",
     });
 
-    const output = await runQuery([
-      "query",
-      "match",
-      "--select-json",
-      selectJson,
-      "--require",
-      "any",
-      "--output",
-      "json",
-      "--session",
-      sessionId,
-    ]);
-
-    const data = JSON.parse(output);
-    if (!data.ok || !data.data?.items || data.data.items.length === 0) {
+    if (!result.ok || !result.items || result.items.length === 0) {
+      console.log(`[Editor] 查询文本: "${pattern}" - 未找到匹配`);
       return [];
     }
 
-    return data.data.items.map((item, index) => ({
+    console.log(
+      `[Editor] 查询文本: "${pattern}" - 找到 ${result.items.length} 个匹配`
+    );
+
+    return result.items.map((item, index) => ({
       index,
       text: item.text || item.content || item.handle?.text || "",
       ref: item.handle?.ref || "",
-      evaluatedRevision: data.data.evaluatedRevision,
+      evaluatedRevision: result.evaluatedRevision,
     }));
   } catch (e) {
-    console.error("[Editor] 查找失败:", e.message);
+    console.log("[Editor] 查找失败:", e.message);
     return [];
   }
 }
@@ -67,54 +62,47 @@ async function replaceFirst(docId, targetText, replacement) {
   }
 
   try {
-    const sessionId = await sessionManager.createOrUseSession(docId);
+    const { doc } = await sessionManager.createOrUseSession(docId);
 
-    const selectJson = JSON.stringify({
-      type: "text",
-      pattern: targetText,
+    // 先查找匹配
+    const matchResult = await doc.query.match({
+      select: {
+        type: "text",
+        pattern: targetText,
+      },
+      require: "first",
     });
 
-    const matchOutput = await runQuery([
-      "query",
-      "match",
-      "--select-json",
-      selectJson,
-      "--require",
-      "first",
-      "--output",
-      "json",
-      "--session",
-      sessionId,
-    ]);
-
-    const matchData = JSON.parse(matchOutput);
-    if (!matchData.ok || !matchData.data?.items || matchData.data.items.length === 0) {
+    if (
+      !matchResult.ok ||
+      !matchResult.items ||
+      matchResult.items.length === 0
+    ) {
       throw new Error("未找到匹配内容");
     }
 
-    const ref = matchData.data.items[0]?.handle?.ref;
+    const ref = matchResult.items[0]?.handle?.ref;
     if (!ref) {
       throw new Error("无法获取替换位置");
     }
 
-    const mutations = JSON.stringify([
-      {
-        id: "replace-1",
-        op: "text.rewrite",
-        where: { by: "ref", ref: ref },
-        args: { replacement: { text: replacement } },
-      },
-    ]);
+    // 应用替换
+    await doc.mutations.apply({
+      expectedRevision: matchResult.evaluatedRevision,
+      atomic: true,
+      steps: [
+        {
+          id: "replace-1",
+          op: "text.rewrite",
+          where: { by: "ref", ref: ref },
+          args: { replacement: { text: replacement } },
+        },
+      ],
+    });
 
-    await runQuery([
-      "mutations",
-      "apply",
-      "--mutations",
-      mutations,
-      "--session",
-      sessionId,
-    ]);
-
+    console.log(
+      `[Editor] 替换第一个: "${targetText}" → "${replacement}" - 成功`
+    );
     return { success: true, replaced: 1 };
   } catch (e) {
     console.error("[Editor] 替换失败:", e.message);
@@ -136,34 +124,29 @@ async function replaceAll(docId, targetText, replacement) {
   }
 
   try {
-    const sessionId = await sessionManager.createOrUseSession(docId);
+    const { doc } = await sessionManager.createOrUseSession(docId);
 
-    const selectJson = JSON.stringify({
-      type: "text",
-      pattern: targetText,
+    // 先查找所有匹配
+    const matchResult = await doc.query.match({
+      select: {
+        type: "text",
+        pattern: targetText,
+      },
+      require: "any",
     });
 
-    const matchOutput = await runQuery([
-      "query",
-      "match",
-      "--select-json",
-      selectJson,
-      "--require",
-      "any",
-      "--output",
-      "json",
-      "--session",
-      sessionId,
-    ]);
-
-    const matchData = JSON.parse(matchOutput);
-    if (!matchData.ok || !matchData.data?.items || matchData.data.items.length === 0) {
+    if (
+      !matchResult.ok ||
+      !matchResult.items ||
+      matchResult.items.length === 0
+    ) {
       return { success: true, replaced: 0 };
     }
 
-    const items = matchData.data.items;
+    const items = matchResult.items;
 
-    const mutations = items
+    // 构建变更列表
+    const steps = items
       .map((item, index) => {
         const ref = item?.handle?.ref;
         if (!ref) return null;
@@ -176,20 +159,21 @@ async function replaceAll(docId, targetText, replacement) {
       })
       .filter(Boolean);
 
-    if (mutations.length === 0) {
+    if (steps.length === 0) {
       return { success: true, replaced: 0 };
     }
 
-    await runQuery([
-      "mutations",
-      "apply",
-      "--mutations",
-      JSON.stringify(mutations),
-      "--session",
-      sessionId,
-    ]);
+    // 批量应用变更
+    await doc.mutations.apply({
+      expectedRevision: matchResult.evaluatedRevision,
+      atomic: true,
+      steps: steps,
+    });
 
-    return { success: true, replaced: mutations.length };
+    console.log(
+      `[Editor] 替换全部: "${targetText}" → "${replacement}" - 替换了 ${steps.length} 处`
+    );
+    return { success: true, replaced: steps.length };
   } catch (e) {
     console.error("[Editor] 替换失败:", e.message);
     return { success: false, message: e.message };
@@ -201,17 +185,17 @@ async function replaceAll(docId, targetText, replacement) {
  * @param {string} docId - 文档 ID
  * @returns {Promise<string>}
  */
-async function getText(docId) {
+async function getTextContent(docId) {
   const docPath = path.join(DOCS_DIR, `${docId}.docx`);
   if (!fs.existsSync(docPath)) {
     throw new Error("文档不存在");
   }
 
   try {
-    const sessionId = await sessionManager.createOrUseSession(docId);
-
-    const output = await runCommand(["get-text", "--session", sessionId]);
-    return output.trim();
+    const { doc } = await sessionManager.createOrUseSession(docId);
+    const text = await doc.getText();
+    console.log(`[Editor] 获取文本: ${docId} - 成功 (${text.length} 字符)`);
+    return text;
   } catch (e) {
     throw new Error("获取文本失败: " + e.message);
   }
@@ -222,17 +206,17 @@ async function getText(docId) {
  * @param {string} docId - 文档 ID
  * @returns {Promise<object>}
  */
-async function getInfo(docId) {
+async function getDocumentInfo(docId) {
   const docPath = path.join(DOCS_DIR, `${docId}.docx`);
   if (!fs.existsSync(docPath)) {
     throw new Error("文档不存在");
   }
 
   try {
-    const sessionId = await sessionManager.createOrUseSession(docId);
-
-    const output = await runCommand(["info", "--session", sessionId]);
-    return JSON.parse(output);
+    const { doc } = await sessionManager.createOrUseSession(docId);
+    const info = await doc.info();
+    console.log(`[Editor] 获取文档信息: ${docId} - 成功`);
+    return info;
   } catch (e) {
     throw new Error("获取信息失败: " + e.message);
   }
@@ -266,8 +250,8 @@ module.exports = {
   findText,
   replaceFirst,
   replaceAll,
-  getText,
-  getInfo,
+  getText: getTextContent,
+  getInfo: getDocumentInfo,
   insertText,
   deleteText,
 };
