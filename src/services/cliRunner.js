@@ -41,19 +41,33 @@ async function disposeClient() {
 
 /**
  * 打开文档并创建会话
- * @param {string} docPath - 文档路径
- * @param {string} sessionId - 会话 ID
+ * @param {object} params - 打开参数
+ * @param {string} params.docPath - 文档路径
+ * @param {string} [params.sessionId] - 会话 ID
+ * @param {object} [params.collaboration] - 协作配置
+ * @param {string} [params.collaboration.providerType] - 协作 provider 类型
+ * @param {string} [params.collaboration.url] - 协作服务地址
+ * @param {string} [params.collaboration.documentId] - 协作文档 ID（房间名）
+ * @param {string} [params.collaboration.onMissing] - 房间缺失时行为
  * @returns {Promise<object>} - 文档对象
  */
-async function openDocument(docPath, sessionId) {
+async function openDocument(params) {
+  const { docPath, sessionId, collaboration } = params;
   const sdkClient = await getClient();
 
-  // 使用 sessionId 如果提供
-  const options = sessionId ? { session: sessionId } : {};
-  const doc = await sdkClient.open({
+  const openPayload = {
     doc: docPath,
-    ...options,
-  });
+  };
+
+  if (sessionId) {
+    openPayload.sessionId = sessionId;
+  }
+
+  if (collaboration) {
+    openPayload.collaboration = collaboration;
+  }
+
+  const doc = await sdkClient.open(openPayload);
 
   console.log(`[SDK] Document opened: ${docPath}`);
   return doc;
@@ -141,7 +155,7 @@ async function applyMutations(doc, params) {
  * @returns {Promise<object>} - 文档对象
  */
 async function openWithSession(docPath, sessionId) {
-  return await openDocument(docPath, sessionId);
+  return await openDocument({ docPath, sessionId });
 }
 
 /**

@@ -1,28 +1,86 @@
 const path = require("path");
-const { 
-  disposeClient,
-  openDocument, 
-  closeDocument, 
-  saveDocument, 
-  DOCS_DIR 
-} = require("../cliRunner");
+const Y = require("yjs");
+const { disposeClient, openDocument, closeDocument, saveDocument, DOCS_DIR } = require("../cliRunner");
 const { getDocumentById } = require("../docServices");
+const config = require("../../config");
 
 /**
  * 活跃会话存储
- * 结构: Map<docId, { sessionId, doc, docPath, createdAt }>
+ * 结构: Map<docId, { sessionId, doc, docPath, roomName, createdAt }>
  */
 const sessions = new Map();
+
+/**
+ * 协作房间存储
+ * 结构: Map<roomName, { roomName, docId, ydoc, createdAt, lastActiveAt }>
+ */
 const rooms = new Map();
-const HOCUSPOCUS_URL = process.env.HOCUSPOCUS_URL || "ws://localhost:1234";
+
+const HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
 
 function resolveRoomName(docId, metadata) {
   return metadata?.roomName || docId;
 }
 
+function touchRoom(room, docId) {
+  if (docId && !room.docId) {
+    room.docId = docId;
+  }
+  room.lastActiveAt = Date.now();
+  return room;
+}
+
+function ensureRoom(roomName, docId) {
+  const existing = rooms.get(roomName);
+  if (existing) {
+    return touchRoom(existing, docId);
+  }
+
+  const room = {
+    roomName,
+    docId: docId || null,
+    ydoc: new Y.Doc(),
+    createdAt: Date.now(),
+    lastActiveAt: Date.now(),
+  };
+  rooms.set(roomName, room);
+  return room;
+}
+
+function getRoomByDocId(docId) {
+  const metadata = getDocumentById(docId);
+  const roomName = resolveRoomName(docId, metadata);
+  return rooms.get(roomName) || null;
+}
+
+function getOrCreateRoomYDoc(roomName, docId) {
+  const room = ensureRoom(roomName, docId);
+  return room.ydoc;
+}
+
+function removeRoomByName(roomName) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+
+  if (room.ydoc && typeof room.ydoc.destroy === "function") {
+    room.ydoc.destroy();
+  }
+  rooms.delete(roomName);
+}
+
+function removeRoomByDocId(docId) {
+  const session = sessions.get(docId);
+  const metadata = getDocumentById(docId);
+  const roomName = session?.roomName || resolveRoomName(docId, metadata);
+  if (roomName) {
+    removeRoomByName(roomName);
+  }
+}
+
 /**
  * 创建或使用已有会话
- * @param {string} docId - 文档 ID（不含 .docx 后缀）
+ * 说明：会话以协作模式连接 Hocuspocus 房间，编辑操作直接作用于 Yjs。
+ * @param {string} docId - 文档 ID
  * @returns {Promise<object>} - { sessionId, doc }
  */
 async function createOrUseSession(docId) {
@@ -32,22 +90,29 @@ async function createOrUseSession(docId) {
   }
 
   const roomName = resolveRoomName(docId, metadata);
+  ensureRoom(roomName, docId);
 
-  // 检查会话是否已存在
   if (sessions.has(docId)) {
     const session = sessions.get(docId);
     console.log(`[SessionManager] 使用已有会话: ${session.sessionId} for ${docId}`);
     return { sessionId: session.sessionId, doc: session.doc };
   }
 
-  // 创建新会话
   const docPath = path.join(DOCS_DIR, metadata.storedName);
   const sessionId = `session-${roomName}-${Date.now()}`;
 
-  console.log(`[SessionManager] 创建新会话: ${sessionId} for ${docId}`);
+  console.log(`[SessionManager] 创建协作会话: ${sessionId} for ${docId}, room=${roomName}`);
 
-  // 使用 SDK 打开文档
-  const doc = await openDocument(docPath, sessionId);
+  const doc = await openDocument({
+    docPath,
+    sessionId,
+    collaboration: {
+      providerType: "hocuspocus",
+      url: HOCUSPOCUS_URL,
+      documentId: roomName,
+      onMissing: "seedFromDoc",
+    },
+  });
 
   sessions.set(docId, {
     sessionId,
@@ -57,21 +122,13 @@ async function createOrUseSession(docId) {
     createdAt: Date.now(),
   });
 
-  if (!rooms.has(roomName)) {
-    rooms.set(roomName, {
-      roomName,
-      docId,
-      createdAt: Date.now(),
-    });
-  }
-
   return { sessionId, doc };
 }
 
 /**
  * 获取会话的文档对象
  * @param {string} docId - 文档 ID
- * @returns {object|null} - 文档对象
+ * @returns {object|null}
  */
 function getSessionDoc(docId) {
   const session = sessions.get(docId);
@@ -93,17 +150,11 @@ async function closeSessionByDocId(docId) {
 
   try {
     await closeDocument(session.doc);
-  } catch (e) {
-    console.error(`[SessionManager] 关闭失败: ${e.message}`);
+  } catch (error) {
+    console.error(`[SessionManager] 关闭失败: ${error.message}`);
   }
-
-  const metadata = getDocumentById(docId);
-  const roomName = session.roomName || resolveRoomName(docId, metadata);
 
   sessions.delete(docId);
-  if (roomName) {
-    rooms.delete(roomName);
-  }
 }
 
 /**
@@ -111,38 +162,36 @@ async function closeSessionByDocId(docId) {
  * @param {string} docId - 文档 ID
  */
 async function saveDocumentById(docId) {
-  const session = sessions.get(docId);
+  let session = sessions.get(docId);
   if (!session) {
-    console.log(`[SessionManager] 会话不存在: ${docId}`);
+    await createOrUseSession(docId);
+    session = sessions.get(docId);
+  }
+
+  if (!session) {
     throw new Error("会话不存在");
   }
 
   console.log(`[SessionManager] 保存文档: ${session.sessionId} for ${docId}`);
-
-  try {
-    await saveDocument(session.doc, { inPlace: true });
-    console.log(`[SessionManager] 文档已保存，Yjs 同步触发`);
-  } catch (e) {
-    console.error(`[SessionManager] 保存失败: ${e.message}`);
-    throw e;
-  }
+  await saveDocument(session.doc, { inPlace: true });
+  console.log(`[SessionManager] 文档已保存，Yjs 同步触发`);
 }
 
 /**
- * 关闭所有会话
+ * 关闭所有会话并清理房间
  */
 async function closeAllSessions() {
   console.log(`[SessionManager] 关闭所有会话，当前活跃: ${sessions.size}`);
 
   const docIds = Array.from(sessions.keys());
-
   for (const docId of docIds) {
     await closeSessionByDocId(docId);
   }
 
-  // 关闭 SDK 客户端
   await disposeClient();
-  rooms.clear();
+
+  const roomNames = Array.from(rooms.keys());
+  roomNames.forEach((roomName) => removeRoomByName(roomName));
 
   console.log(`[SessionManager] 所有会话已关闭`);
 }
@@ -166,10 +215,9 @@ function hasSession(docId) {
 }
 
 /**
- * 确保 Yjs 协作 Room 已创建
- * 在前端连接前调用，确保 room 已存在
+ * 确保 Yjs 协作 Room 与协作会话已创建
  * @param {string} docId - 文档 ID
- * @returns {Promise<void>}
+ * @returns {Promise<object>}
  */
 async function ensureYjsRoom(docId) {
   const metadata = getDocumentById(docId);
@@ -178,14 +226,7 @@ async function ensureYjsRoom(docId) {
   }
 
   const roomName = resolveRoomName(docId, metadata);
-
-  if (!rooms.has(roomName)) {
-    rooms.set(roomName, {
-      roomName,
-      docId,
-      createdAt: Date.now(),
-    });
-  }
+  ensureRoom(roomName, docId);
 
   if (!sessions.has(docId)) {
     console.log(`[SessionManager] 创建 Yjs Room: ${roomName} (docId: ${docId})`);
@@ -217,13 +258,13 @@ function getRoomInfoByDocId(docId) {
   }
 
   const roomName = resolveRoomName(docId, metadata);
-  const room = rooms.get(roomName);
+  const room = ensureRoom(roomName, docId);
 
   return {
     docId,
     roomName,
     wsUrl: HOCUSPOCUS_URL,
-    createdAt: room?.createdAt || null,
+    createdAt: room.createdAt,
     hasSession: sessions.has(docId),
   };
 }
@@ -239,4 +280,7 @@ module.exports = {
   getActiveSessionDocIds,
   ensureYjsRoom,
   getRoomInfoByDocId,
+  getOrCreateRoomYDoc,
+  getRoomByDocId,
+  removeRoomByDocId,
 };

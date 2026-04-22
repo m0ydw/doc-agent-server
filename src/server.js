@@ -34,22 +34,20 @@ app.listen(PORT, () => {
 
 // ------------ Hocuspocus Yjs WebSocket 服务（独立端口）------------
 const hocuspocus = new Server({
-  port: 1234,
+  port: config.HOCUSPOCUS_PORT,
 
   // 文档加载回调
   onLoadDocument: async (data) => {
-    const docName = data.documentName;
-    console.log("[Hocuspocus] 加载文档:", docName);
+    const roomName = data.documentName;
+    console.log("[Hocuspocus] 加载房间:", roomName);
 
     try {
-      // 使用 sessionManager 获取或创建会话，与 editor 操作共享同一个 SDK doc 实例
-      const { doc } = await sessionManager.createOrUseSession(docName);
-      const ydoc = doc.ydoc;
-      console.log("[Hocuspocus] Yjs 文档已就绪:", docName);
+      // 协作房间由 sessionManager 维护，避免在 onLoadDocument 中再次触发 SDK open 递归。
+      const ydoc = sessionManager.getOrCreateRoomYDoc(roomName);
+      console.log("[Hocuspocus] 房间 Yjs 文档已就绪:", roomName);
       return ydoc;
-    } catch (e) {
-      console.error("[Hocuspocus] 加载失败:", e.message);
-      // 返回一个新文档
+    } catch (error) {
+      console.error("[Hocuspocus] 加载失败:", error.message);
       return new Y.Doc();
     }
   },
@@ -72,5 +70,5 @@ const hocuspocus = new Server({
 
 hocuspocus.listen();
 console.log("Hocuspocus Yjs 服务已启动");
-console.log("协作地址：ws://localhost:1234");
+console.log(`协作地址：${config.HOCUSPOCUS_URL}`);
 // -------------------------------------------------

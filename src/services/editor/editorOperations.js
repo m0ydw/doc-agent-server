@@ -1,7 +1,9 @@
-const fs = require("fs");
-const path = require("path");
-const { DOCS_DIR, getText, getInfo } = require("../cliRunner");
 const sessionManager = require("../session");
+
+async function getDocumentSession(docId) {
+  const { doc } = await sessionManager.createOrUseSession(docId);
+  return doc;
+}
 
 /**
  * 查找文本在文档中的位置
@@ -11,13 +13,8 @@ const sessionManager = require("../session");
  */
 async function findText(docId, pattern) {
   console.log(`查询内容${pattern}`);
-  const docPath = path.join(DOCS_DIR, `${docId}.docx`);
-  if (!fs.existsSync(docPath)) {
-    throw new Error("文档不存在");
-  }
-
   try {
-    const { doc } = await sessionManager.createOrUseSession(docId);
+    const doc = await getDocumentSession(docId);
 
     const result = await doc.query.match({
       select: {
@@ -57,13 +54,8 @@ async function findText(docId, pattern) {
  * @returns {Promise<object>}
  */
 async function replaceFirst(docId, targetText, replacement) {
-  const docPath = path.join(DOCS_DIR, `${docId}.docx`);
-  if (!fs.existsSync(docPath)) {
-    throw new Error("文档不存在");
-  }
-
   try {
-    const { doc } = await sessionManager.createOrUseSession(docId);
+    const doc = await getDocumentSession(docId);
 
     // 先查找匹配
     const matchResult = await doc.query.match({
@@ -116,13 +108,8 @@ async function replaceFirst(docId, targetText, replacement) {
  * @returns {Promise<object>}
  */
 async function replaceAll(docId, targetText, replacement) {
-  const docPath = path.join(DOCS_DIR, `${docId}.docx`);
-  if (!fs.existsSync(docPath)) {
-    throw new Error("文档不存在");
-  }
-
   try {
-    const { doc } = await sessionManager.createOrUseSession(docId);
+    const doc = await getDocumentSession(docId);
 
     // 先查找所有匹配
     const matchResult = await doc.query.match({
@@ -181,13 +168,8 @@ async function replaceAll(docId, targetText, replacement) {
  * @returns {Promise<string>}
  */
 async function getTextContent(docId) {
-  const docPath = path.join(DOCS_DIR, `${docId}.docx`);
-  if (!fs.existsSync(docPath)) {
-    throw new Error("文档不存在");
-  }
-
   try {
-    const { doc } = await sessionManager.createOrUseSession(docId);
+    const doc = await getDocumentSession(docId);
     const text = await doc.getText();
     console.log(`[Editor] 获取文本: ${docId} - 成功 (${text.length} 字符)`);
     return text;
@@ -202,13 +184,8 @@ async function getTextContent(docId) {
  * @returns {Promise<object>}
  */
 async function getDocumentInfo(docId) {
-  const docPath = path.join(DOCS_DIR, `${docId}.docx`);
-  if (!fs.existsSync(docPath)) {
-    throw new Error("文档不存在");
-  }
-
   try {
-    const { doc } = await sessionManager.createOrUseSession(docId);
+    const doc = await getDocumentSession(docId);
     const info = await doc.info();
     console.log(`[Editor] 获取文档信息: ${docId} - 成功`);
     return info;

@@ -27,8 +27,7 @@ const {
 } = require("../services/docServices");
 
 const router = express.Router();
-const DEFAULT_HOCUSPOCUS_URL =
-  process.env.HOCUSPOCUS_URL || `ws://localhost:1234`;
+const DEFAULT_HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
 
 router.get("/events", createSSEHandler);
 
@@ -226,6 +225,10 @@ router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const doc = getDocumentById(id);
+
+    await sessionManager.closeSessionByDocId(id);
+    sessionManager.removeRoomByDocId(id);
+
     const success = deleteDocument(id);
 
     if (!success) {
