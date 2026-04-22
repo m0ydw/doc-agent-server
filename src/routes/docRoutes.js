@@ -120,7 +120,8 @@ router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Hocuspocus Server 自动管理 Yjs 文档，不需要手动创建
+    // 确保 Yjs Room 已就绪（创建 SDK session 供 Hocuspocus 共享使用）
+    await sessionManager.ensureYjsRoom(id);
 
     const result = getDocumentFile(id);
 
