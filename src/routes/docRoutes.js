@@ -77,10 +77,7 @@ const fileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
   console.log("fileFilter: ext=", ext);
 
-  if (
-    allowedTypes.includes(file.mimetype) ||
-    allowedExtensions.includes(ext)
-  ) {
+  if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
     cb(null, true);
   } else {
     cb(new Error("只支持 .doc 和 .docx 文件"), false);
@@ -94,7 +91,7 @@ const upload = multer({
     fileSize: 50 * 1024 * 1024,
   },
 });
-
+//上传文件的路由入口
 router.post("/upload", upload.array("files", 10), async (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
@@ -108,7 +105,9 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
 
     const results = await Promise.all(
       req.files.map(async (file) => {
+        //保存到磁盘
         const metadata = saveDocument(file);
+        //创建room
         const roomInfo = await sessionManager.ensureYjsRoom(metadata.id);
         return withCollaboration(metadata, roomInfo);
       })
@@ -128,10 +127,12 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
 router.get("/list", async (req, res) => {
   try {
     const documents = getDocumentList();
-    const mappedDocuments = documents.map((doc) => {
-      const roomInfo = sessionManager.getRoomInfoByDocId(doc.id);
-      return withCollaboration(doc, roomInfo);
-    });
+    const mappedDocuments = await Promise.all(
+      documents.map(async (doc) => {
+        const roomInfo = await sessionManager.getRoomInfoByDocId(doc.id);
+        return withCollaboration(doc, roomInfo);
+      })
+    );
 
     res.json({
       success: true,
@@ -209,7 +210,7 @@ router.get("/:id/info", async (req, res) => {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    const roomInfo = sessionManager.getRoomInfoByDocId(id);
+    const roomInfo = await sessionManager.getRoomInfoByDocId(id);
 
     res.json({
       success: true,

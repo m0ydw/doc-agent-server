@@ -43,7 +43,7 @@ const hocuspocus = new Server({
 
     try {
       // 协作房间由 sessionManager 维护，避免在 onLoadDocument 中再次触发 SDK open 递归。
-      const ydoc = sessionManager.getOrCreateRoomYDoc(roomName);
+      const ydoc = await sessionManager.getOrCreateRoomYDoc(roomName);
       console.log("[Hocuspocus] 房间 Yjs 文档已就绪:", roomName);
       return ydoc;
     } catch (error) {
