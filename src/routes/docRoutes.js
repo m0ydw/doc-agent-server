@@ -1,6 +1,7 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
+const config = require("../config");
 
 function decodeFilename(filename) {
   if (!filename) return filename;
@@ -26,10 +27,27 @@ const {
 } = require("../services/docServices");
 
 const router = express.Router();
+const DEFAULT_HOCUSPOCUS_URL =
+  process.env.HOCUSPOCUS_URL || `ws://localhost:1234`;
 
 router.get("/events", createSSEHandler);
 
 const sessionManager = require("../services/session");
+
+function withCollaboration(document, roomInfo) {
+  const roomName = roomInfo?.roomName || document.roomName || document.id;
+  const wsUrl = roomInfo?.wsUrl || DEFAULT_HOCUSPOCUS_URL;
+
+  return {
+    ...document,
+    roomName,
+    collaboration: {
+      docId: document.id,
+      roomName,
+      wsUrl,
+    },
+  };
+}
 
 router.post("/cleanup", async (req, res) => {
   try {
@@ -89,7 +107,13 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
       file.originalname = decodedName;
     });
 
-    const results = req.files.map((file) => saveDocument(file));
+    const results = await Promise.all(
+      req.files.map(async (file) => {
+        const metadata = saveDocument(file);
+        const roomInfo = await sessionManager.ensureYjsRoom(metadata.id);
+        return withCollaboration(metadata, roomInfo);
+      })
+    );
 
     res.json({
       success: true,
@@ -105,14 +129,43 @@ router.post("/upload", upload.array("files", 10), async (req, res) => {
 router.get("/list", async (req, res) => {
   try {
     const documents = getDocumentList();
+    const mappedDocuments = documents.map((doc) => {
+      const roomInfo = sessionManager.getRoomInfoByDocId(doc.id);
+      return withCollaboration(doc, roomInfo);
+    });
+
     res.json({
       success: true,
-      documents,
-      total: documents.length,
+      documents: mappedDocuments,
+      total: mappedDocuments.length,
     });
   } catch (error) {
     console.error("获取文件列表失败:", error);
     res.status(500).json({ error: "获取文件列表失败" });
+  }
+});
+
+router.post("/:id/open", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const document = getDocumentById(id);
+
+    if (!document) {
+      return res.status(404).json({ error: "文件不存在" });
+    }
+
+    const roomInfo = await sessionManager.ensureYjsRoom(id);
+
+    res.json({
+      success: true,
+      document: withCollaboration(document, roomInfo),
+      backend: {
+        httpBaseUrl: `http://localhost:${config.PORT}`,
+      },
+    });
+  } catch (error) {
+    console.error("打开文档失败:", error);
+    res.status(500).json({ error: "打开文档失败" });
   }
 });
 
@@ -151,15 +204,17 @@ router.get("/:id", async (req, res) => {
 router.get("/:id/info", async (req, res) => {
   try {
     const { id } = req.params;
-    const document = getDocumentFile(id);
+    const file = getDocumentFile(id);
 
-    if (!document) {
+    if (!file) {
       return res.status(404).json({ error: "文件不存在" });
     }
 
+    const roomInfo = sessionManager.getRoomInfoByDocId(id);
+
     res.json({
       success: true,
-      document: document.metadata,
+      document: withCollaboration(file.metadata, roomInfo),
     });
   } catch (error) {
     console.error("获取文件信息失败:", error);

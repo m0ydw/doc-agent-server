@@ -31,6 +31,7 @@ function saveDocument(file) {
 
   const metadata = {
     id: fileId,
+    roomName: fileId,
     originalName: file.originalname,
     storedName: storedFilename,
     size: file.size,
@@ -101,7 +102,11 @@ function getDocumentList() {
     .map((f) => {
       try {
         const content = fs.readFileSync(path.join(UPLOAD_DIR, f), "utf-8");
-        return JSON.parse(content);
+        const doc = JSON.parse(content);
+        if (!doc.roomName) {
+          doc.roomName = doc.id;
+        }
+        return doc;
       } catch {
         return null;
       }
@@ -122,7 +127,11 @@ function getDocumentById(id) {
 
   try {
     const content = fs.readFileSync(metadataPath, "utf-8");
-    return JSON.parse(content);
+    const doc = JSON.parse(content);
+    if (!doc.roomName) {
+      doc.roomName = doc.id;
+    }
+    return doc;
   } catch {
     return null;
   }

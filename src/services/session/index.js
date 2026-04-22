@@ -8,4 +8,5 @@ module.exports = {
   hasSession: sessionManager.hasSession,
   getActiveSessionDocIds: sessionManager.getActiveSessionDocIds,
   ensureYjsRoom: sessionManager.ensureYjsRoom,
+  getRoomInfoByDocId: sessionManager.getRoomInfoByDocId,
 };
