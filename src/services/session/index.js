@@ -12,5 +12,7 @@ module.exports = {
   getRoomInfoByDocId: sessionManager.getRoomInfoByDocId,
   getOrCreateRoomYDoc: sessionManager.getOrCreateRoomYDoc,
   getRoomByDocId: sessionManager.getRoomByDocId,
+  getRoomByName: sessionManager.getRoomByName,
+  registerRoom: sessionManager.registerRoom,
   removeRoomByDocId: sessionManager.removeRoomByDocId,
 };

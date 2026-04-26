@@ -1,6 +1,5 @@
 const path = require("path");
 const Y = require("yjs");
-const { Editor, getStarterExtensions } = require("superdoc/super-editor");
 const {
   disposeClient,
   openDocument,
@@ -43,29 +42,9 @@ async function ensureRoom(roomName, docId, metadata) {
     return touchRoom(existing, docId);
   }
 
-  // 1. 创建 ydoc
+  // 只创建空 ydoc，不加载 docx
+  // 内容由第一个连接者（前端）seed
   const ydoc = new Y.Doc();
-
-  // 2. 使用 metadata 获取 docPath
-  if (metadata) {
-    const docPath = path.join(DOCS_DIR, metadata.storedName);
-    try {
-      const fragment = ydoc.getXmlFragment("prosemirror");
-      const editor = new Editor({
-        mode: "docx",
-        isHeadless: true,
-        extensions: getStarterExtensions(),
-        fragment,
-      });
-      
-      await editor.open(docPath);
-      console.log(`[ensureRoom] 已加载 docx 到 ydoc: ${docPath}`);
-      
-      ydoc._editor = editor;
-    } catch (error) {
-      console.error(`[ensureRoom] 加载 docx 失败: ${error.message}`);
-    }
-  }
 
   const room = {
     roomName,
@@ -84,25 +63,47 @@ function getRoomByDocId(docId) {
   return rooms.get(roomName) || null;
 }
 
-async function getOrCreateRoomYDoc(roomName, docId) {
-  let metadata = null;
-  if (docId) {
-    metadata = getDocumentById(docId);
+function getRoomByName(roomName) {
+  return rooms.get(roomName) || null;
+}
+
+/**
+ * 注册 Room（当 Hocuspocus 创建 ydoc 后调用）
+ * @param {string} roomName - 房间名
+ * @param {object} ydoc - Yjs 文档
+ * @param {string} docId - 文档 ID（可选）
+ */
+function registerRoom(roomName, ydoc, docId) {
+  const existing = rooms.get(roomName);
+  if (existing) {
+    return existing;
   }
-  const room = await ensureRoom(roomName, docId, metadata);
-  return room.ydoc;
+  
+  const room = {
+    roomName,
+    docId: docId || null,
+    ydoc,
+    createdAt: Date.now(),
+    lastActiveAt: Date.now(),
+  };
+  rooms.set(roomName, room);
+  return room;
+}
+
+function getOrCreateRoomYDoc(roomName, docId) {
+  // 检查 room 是否已存在
+  const existingRoom = rooms.get(roomName);
+  if (existingRoom) {
+    return existingRoom.ydoc;
+  }
+  // 不提前创建，让 onLoadDocument 处理
+  return null;
 }
 
 function removeRoomByName(roomName) {
   const room = rooms.get(roomName);
   if (!room) return;
 
-  // 销毁 editor
-  if (room.ydoc._editor) {
-    room.ydoc._editor.destroy();
-    delete room.ydoc._editor;
-  }
-  
   if (room.ydoc && typeof room.ydoc.destroy === "function") {
     room.ydoc.destroy();
   }
@@ -131,7 +132,7 @@ async function createOrUseSession(docId) {
   }
 
   const roomName = resolveRoomName(docId, metadata);
-  await ensureRoom(roomName, docId, metadata);
+  ensureRoom(roomName, docId);
 
   if (sessions.has(docId)) {
     const session = sessions.get(docId);
@@ -155,7 +156,7 @@ async function createOrUseSession(docId) {
       providerType: "hocuspocus",
       url: HOCUSPOCUS_URL,
       documentId: roomName,
-      onMissing: "error",
+      onMissing: "seedFromDoc",
     },
   });
 
@@ -260,7 +261,8 @@ function hasSession(docId) {
 }
 
 /**
- * 确保 Yjs 协作 Room 与协作会话已创建
+ * 确保 Yjs 协作 Room 信息
+ * 注意：不提前创建 room，让 Hocuspocus 在 onLoadDocument 时处理
  * @param {string} docId - 文档 ID
  * @returns {Promise<object>}
  */
@@ -268,29 +270,18 @@ async function ensureYjsRoom(docId) {
   //获取文档数据
   const metadata = getDocumentById(docId);
   if (!metadata) {
-    throw new Error(`文档不存在: ${docId}`);
+throw new Error(`文档不存在: ${docId}`);
   }
   //获取房间名
   const roomName = resolveRoomName(docId, metadata);
-  //创建ydoc并加载docx内容
-  await ensureRoom(roomName, docId, metadata);
 
-  if (!sessions.has(docId)) {
-    console.log(
-      `[SessionManager] 创建 Yjs Room: ${roomName} (docId: ${docId})`
-    );
-    await createOrUseSession(docId);
-  } else {
-    console.log(
-      `[SessionManager] Yjs Room 已存在: ${roomName} (docId: ${docId})`
-    );
-  }
+  // 不在这里创建 room，让 Hocuspocus 的 onLoadDocument 处理
+  // SDK 连接时会自动创建 room 并 seed 内容
 
   return {
     docId,
     roomName,
     wsUrl: HOCUSPOCUS_URL,
-    hasSession: sessions.has(docId),
   };
 }
 
@@ -302,14 +293,14 @@ function getActiveSessionDocIds() {
   return Array.from(sessions.keys());
 }
 
-async function getRoomInfoByDocId(docId) {
+function getRoomInfoByDocId(docId) {
   const metadata = getDocumentById(docId);
   if (!metadata) {
     return null;
   }
 
   const roomName = resolveRoomName(docId, metadata);
-  const room = await ensureRoom(roomName, docId, metadata);
+  const room = ensureRoom(roomName, docId);
 
   return {
     docId,
@@ -333,5 +324,7 @@ module.exports = {
   getRoomInfoByDocId,
   getOrCreateRoomYDoc,
   getRoomByDocId,
+  getRoomByName,
+  registerRoom,
   removeRoomByDocId,
 };

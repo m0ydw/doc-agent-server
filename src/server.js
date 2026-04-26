@@ -39,12 +39,25 @@ const hocuspocus = new Server({
   // 文档加载回调
   onLoadDocument: async (data) => {
     const roomName = data.documentName;
+    const docId = data.documentName; // 使用 roomName 作为 docId
     console.log("[Hocuspocus] 加载房间:", roomName);
 
     try {
-      // 协作房间由 sessionManager 维护，避免在 onLoadDocument 中再次触发 SDK open 递归。
-      const ydoc = await sessionManager.getOrCreateRoomYDoc(roomName);
-      console.log("[Hocuspocus] 房间 Yjs 文档已就绪:", roomName);
+      // 检查 room 是否已存在
+      const existingRoom = sessionManager.getRoomByName(roomName);
+      if (existingRoom) {
+        console.log("[Hocuspocus] 返回已有 ydoc:", roomName);
+        return existingRoom.ydoc;
+      }
+      
+      // 创建新的空 ydoc
+      // SDK 连接时会带 doc 参数，会自动 seed 内容到 ydoc
+      const ydoc = new Y.Doc();
+      console.log("[Hocuspocus] 创建新 ydoc:", roomName);
+      
+      // 注册 room（让 SDK 加入时共享同一个 ydoc）
+      sessionManager.registerRoom(roomName, ydoc, docId);
+      
       return ydoc;
     } catch (error) {
       console.error("[Hocuspocus] 加载失败:", error.message);

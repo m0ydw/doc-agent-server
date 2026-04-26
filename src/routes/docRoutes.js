@@ -129,7 +129,7 @@ router.get("/list", async (req, res) => {
     const documents = getDocumentList();
     const mappedDocuments = await Promise.all(
       documents.map(async (doc) => {
-        const roomInfo = await sessionManager.getRoomInfoByDocId(doc.id);
+        const roomInfo = sessionManager.getRoomInfoByDocId(doc.id);
         return withCollaboration(doc, roomInfo);
       })
     );
@@ -210,7 +210,7 @@ router.get("/:id/info", async (req, res) => {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    const roomInfo = await sessionManager.getRoomInfoByDocId(id);
+    const roomInfo = sessionManager.getRoomInfoByDocId(id);
 
     res.json({
       success: true,
