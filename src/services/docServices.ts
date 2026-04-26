@@ -1,22 +1,22 @@
 import fs from "fs";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
-import { EventEmitter } from "events";
 
 export const UPLOAD_DIR = path.join(__dirname, "../../uploads");
 
-export const docEmitter = new EventEmitter();
-docEmitter.setMaxListeners(100);
-
+// 确保上传目录存在
 function ensureUploadDir(): void {
   if (!fs.existsSync(UPLOAD_DIR)) {
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   }
 }
 
+// 生成文件 ID
 function generateFileId(): string {
   return uuidv4();
 }
+
+// ===== 文档元数据 =====
 
 export interface DocumentMetadata {
   id: string;
@@ -29,6 +29,12 @@ export interface DocumentMetadata {
   filePath: string;
 }
 
+// ===== 基础文件服务 =====
+
+/**
+ * 保存文档（写入临时种子文件，播种后会被删除）
+ * 返回元数据供后续使用
+ */
 export function saveDocument(file: {
   originalname: string;
   buffer: Buffer;
@@ -56,68 +62,16 @@ export function saveDocument(file: {
     filePath: `/uploads/${storedFilename}`,
   };
 
+  // 保存元数据 JSON
   const metadataPath = path.join(UPLOAD_DIR, `${fileId}.json`);
   fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
   return metadata;
 }
 
-export function updateDocument(
-  id: string,
-  fileBuffer: Buffer
-): DocumentMetadata | null {
-  const metadata = getDocumentById(id);
-  if (!metadata) {
-    return null;
-  }
-
-  const filePath = path.join(UPLOAD_DIR, metadata.storedName);
-  fs.writeFileSync(filePath, fileBuffer);
-
-  metadata.uploadedAt = new Date().toISOString();
-  const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
-
-  docEmitter.emit("file_updated", { fileId: id, fileName: metadata.originalName });
-
-  return metadata;
-}
-
-export interface SSEventSource {
-  setHeader(key: string, value: string): void;
-  flushHeaders(): void;
-  write(data: string): void;
-  end(): void;
-}
-
-export function createSSEHandler(req: { on: (event: string, cb: () => void) => void }, res: SSEventSource): void {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  const onFileUpdated = (data: { fileId: string; fileName: string }) => {
-    res.write(`event: file_updated\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  const onFileDeleted = (data: { fileId: string; fileName: string }) => {
-    res.write(`event: file_deleted\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  docEmitter.on("file_updated", onFileUpdated);
-  docEmitter.on("file_deleted", onFileDeleted);
-
-  req.on("close", () => {
-    docEmitter.off("file_updated", onFileUpdated);
-    docEmitter.off("file_deleted", onFileDeleted);
-    res.end();
-  });
-}
-
-export function emitFileDeleted(data: { fileId: string; fileName: string }): void {
-  docEmitter.emit("file_deleted", data);
-}
-
+/**
+ * 获取文档元数据列表
+ */
 export function getDocumentList(): DocumentMetadata[] {
   ensureUploadDir();
 
@@ -144,6 +98,9 @@ export function getDocumentList(): DocumentMetadata[] {
   );
 }
 
+/**
+ * 根据 ID 获取文档元数据
+ */
 export function getDocumentById(id: string): DocumentMetadata | null {
   const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
 
@@ -163,6 +120,9 @@ export function getDocumentById(id: string): DocumentMetadata | null {
   }
 }
 
+/**
+ * 获取文档文件路径和元数据
+ */
 export function getDocumentFile(
   id: string
 ): { path: string; metadata: DocumentMetadata } | null {
@@ -175,6 +135,7 @@ export function getDocumentFile(
   const filePath = path.join(UPLOAD_DIR, metadata.storedName);
 
   if (!fs.existsSync(filePath)) {
+    // 文件可能被删除了（如种子文件），返回元数据但不包含文件
     return null;
   }
 
@@ -184,6 +145,9 @@ export function getDocumentFile(
   };
 }
 
+/**
+ * 删除文档
+ */
 export function deleteDocument(id: string): boolean {
   const metadata = getDocumentById(id);
 
@@ -205,6 +169,9 @@ export function deleteDocument(id: string): boolean {
   return true;
 }
 
+/**
+ * 清理文档（批量删除）
+ */
 export function cleanupDocuments(keepIds: string[]): number {
   const allDocs = getDocumentList();
   let deletedCount = 0;

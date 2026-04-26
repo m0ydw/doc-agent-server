@@ -1,8 +1,8 @@
 import express, { Request, Response, Router } from "express";
 import multer from "multer";
 import path from "path";
+import fs from "fs";
 import config from "../config";
-
 import {
   saveDocument,
   getDocumentList,
@@ -10,20 +10,14 @@ import {
   getDocumentById,
   deleteDocument,
   cleanupDocuments,
-  createSSEHandler,
-  emitFileDeleted,
   DocumentMetadata,
 } from "../services/docServices";
-
 import * as sessionManager from "../services/session";
 
 const router: Router = express.Router();
-const DEFAULT_HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
+const HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
 
-router.get("/events", (req: Request, res: Response) => {
-  createSSEHandler(req as any, res as any);
-});
-
+// ===== 文件名解码 =====
 function decodeFilename(filename: string): string {
   if (!filename) return filename;
   try {
@@ -36,12 +30,11 @@ function decodeFilename(filename: string): string {
   }
 }
 
-function withCollaboration(
-  document: DocumentMetadata,
-  roomInfo: any
-) {
-  const roomName = roomInfo ? roomInfo.roomName : (document.roomName || document.id);
-  const wsUrl = roomInfo ? roomInfo.wsUrl : DEFAULT_HOCUSPOCUS_URL;
+// ===== 辅助函数 =====
+
+function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: string; wsUrl: string }) {
+  const roomName = roomInfo?.roomName || document.roomName || document.id;
+  const wsUrl = roomInfo?.wsUrl || HOCUSPOCUS_URL;
 
   return {
     ...document,
@@ -54,13 +47,20 @@ function withCollaboration(
   };
 }
 
+// ===== 路由 =====
+
+/**
+ * 清理文档
+ */
 router.post("/cleanup", async (req: Request, res: Response) => {
   try {
     const { keepIds } = req.body;
     if (!Array.isArray(keepIds)) {
       return res.status(400).json({ error: "keepIds 必须是数组" });
     }
+    // 关闭所有 SDK 会话
     await sessionManager.closeAllSessions();
+    // 清理磁盘文件
     var deleted = cleanupDocuments(keepIds);
     res.json({ success: true, message: "清理完成", deleted: deleted });
   } catch (error) {
@@ -69,11 +69,12 @@ router.post("/cleanup", async (req: Request, res: Response) => {
   }
 });
 
+// ===== Multer 配置 =====
 const storage = multer.memoryStorage();
 
 const upload = multer({
   storage: storage,
-  fileFilter: function(_req, file, cb) {
+  fileFilter: function (_req, file, cb) {
     var allowedTypes = [
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/msword",
@@ -94,6 +95,9 @@ const upload = multer({
   },
 });
 
+/**
+ * 上传文档并播种到 Yjs 协作房间
+ */
 router.post(
   "/upload",
   upload.array("files", 10),
@@ -103,19 +107,51 @@ router.post(
         return res.status(400).json({ error: "没有文件被上传" });
       }
 
-      var files = req.files as any[];
-      for (var i = 0; i < files.length; i++) {
-        var file = files[i];
-        var decodedName = decodeFilename(file.originalname);
-        file.originalname = decodedName;
-      }
+      const results = [];
 
-      var results = [];
-      for (var j = 0; j < files.length; j++) {
-        var f = files[j];
-        var metadata = saveDocument(f);
-        var roomInfo = await sessionManager.ensureYjsRoom(metadata.id);
-        results.push(withCollaboration(metadata, roomInfo));
+      for (const file of req.files as any[]) {
+        // 解码文件名
+        file.originalname = decodeFilename(file.originalname);
+
+        // 1. 保存临时种子文件，saveDocument 会生成 fileId 并存储
+        const metadata = saveDocument({
+          originalname: file.originalname,
+          buffer: file.buffer,
+          size: file.size,
+          mimetype: file.mimetype,
+        });
+
+        // 临时文件路径
+        const tempFilePath = path.join(
+          __dirname,
+          "../../uploads",
+          metadata.storedName
+        );
+
+        try {
+          // 2. 使用 SDK 将种子文件播种到 Yjs 房间
+          console.log(`[DocRoutes] 播种种子文件: ${metadata.id}`);
+          await sessionManager.createOrUseSessionWithSeed(metadata.id, tempFilePath);
+        } finally {
+          // 3. 无论播种成功与否，清理临时文件
+          // 但保留元数据文件（.json），删除 .docx 临时文件
+          try {
+            if (fs.existsSync(tempFilePath)) {
+              fs.unlinkSync(tempFilePath);
+              console.log(`[DocRoutes] 已清理临时文件: ${tempFilePath}`);
+            }
+          } catch (cleanupError) {
+            console.warn("[DocRoutes] 临时文件清理失败:", (cleanupError as Error).message);
+          }
+        }
+
+        // 返回协作信息
+        results.push(
+          withCollaboration(metadata, {
+            roomName: metadata.id,
+            wsUrl: HOCUSPOCUS_URL,
+          })
+        );
       }
 
       res.json({
@@ -130,15 +166,18 @@ router.post(
   }
 );
 
+/**
+ * 获取文档列表
+ */
 router.get("/list", async (req: Request, res: Response) => {
   try {
-    var documents = getDocumentList();
-    var mappedDocuments = [];
-    for (var i = 0; i < documents.length; i++) {
-      var doc = documents[i];
-      var roomInfo = sessionManager.getRoomInfoByDocId(doc.id);
-      mappedDocuments.push(withCollaboration(doc, roomInfo));
-    }
+    const documents = getDocumentList();
+    const mappedDocuments = documents.map((doc) =>
+      withCollaboration(doc, {
+        roomName: doc.id,
+        wsUrl: HOCUSPOCUS_URL,
+      })
+    );
 
     res.json({
       success: true,
@@ -151,16 +190,20 @@ router.get("/list", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * 打开文档（加入协作房间）
+ */
 router.post("/:id/open", async (req: Request, res: Response) => {
   try {
-    var id = req.params.id;
-    var document = getDocumentById(id);
+    const id = req.params.id;
+    const document = getDocumentById(id);
 
     if (!document) {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    var roomInfo = await sessionManager.ensureYjsRoom(id);
+    // 加入 Yjs 协作房间
+    const roomInfo = await sessionManager.ensureYjsRoom(id);
 
     res.json({
       success: true,
@@ -175,20 +218,25 @@ router.post("/:id/open", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * 下载文档（如果磁盘文件还存在）
+ */
 router.get("/:id", async (req: Request, res: Response) => {
   try {
-    var id = req.params.id;
+    const id = req.params.id;
 
+    // 加入协作房间
     await sessionManager.ensureYjsRoom(id);
 
-    var result = getDocumentFile(id);
+    const result = getDocumentFile(id);
 
     if (!result) {
-      return res.status(404).json({ error: "文件不存在" });
+      // 文档可能只有 Yjs 状态，没有磁盘文件
+      return res.status(404).json({ error: "文件不存在或已被清理" });
     }
 
-    var filePath = result.path;
-    var metadata = result.metadata;
+    const filePath = result.path;
+    const metadata = result.metadata;
 
     res.setHeader(
       "Content-Type",
@@ -207,20 +255,24 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * 获取文档信息
+ */
 router.get("/:id/info", async (req: Request, res: Response) => {
   try {
-    var id = req.params.id;
-    var file = getDocumentFile(id);
+    const id = req.params.id;
+    const document = getDocumentById(id);
 
-    if (!file) {
+    if (!document) {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    var roomInfo = sessionManager.getRoomInfoByDocId(id);
-
     res.json({
       success: true,
-      document: withCollaboration(file.metadata, roomInfo),
+      document: withCollaboration(document, {
+        roomName: document.id,
+        wsUrl: HOCUSPOCUS_URL,
+      }),
     });
   } catch (error) {
     console.error("获取文件信息失败:", error);
@@ -228,22 +280,21 @@ router.get("/:id/info", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * 删除文档
+ */
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
-    var id = req.params.id;
-    var doc = getDocumentById(id);
+    const id = req.params.id;
+    const document = getDocumentById(id);
 
+    // 关闭 SDK 会话
     await sessionManager.closeSessionByDocId(id);
-    sessionManager.removeRoomByDocId(id);
 
-    var success = deleteDocument(id);
+    const success = deleteDocument(id);
 
     if (!success) {
       return res.status(404).json({ error: "文件不存在" });
-    }
-
-    if (doc) {
-      emitFileDeleted({ fileId: id, fileName: doc.originalName });
     }
 
     res.json({
