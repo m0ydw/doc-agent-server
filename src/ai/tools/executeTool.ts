@@ -12,6 +12,8 @@ export interface ExecuteState {
       params: any;
     }>;
   };
+  /** 执行日志 输出参数 */
+  execution_log?: string;
 }
 
 export interface ExecuteResult {
@@ -70,9 +72,12 @@ export class ExecuteTool {
 
   async *streamExecute(state: ExecuteState): AsyncGenerator<string, void, unknown> {
     var steps = state.plan?.steps || [];
+    var executionLog: string[] = [];
 
     if (steps.length === 0) {
-      yield "[执行工具] 无步骤需要执行\n";
+      var msg = "[执行工具] 无步骤需要执行\n";
+      yield msg;
+      state.execution_log = msg;
       return;
     }
 
@@ -81,29 +86,55 @@ export class ExecuteTool {
       var action = step.action;
       var params = step.params;
 
-      yield "[执行工具] 执行动作: " + action + "\n";
-      yield "[执行工具] 参数: " + JSON.stringify(params) + "\n";
+      var logLine = "[执行工具] 执行动作: " + action + "\n";
+      yield logLine;
+      executionLog.push(logLine);
+
+      logLine = "[执行工具] 参数: " + JSON.stringify(params) + "\n";
+      yield logLine;
+      executionLog.push(logLine);
 
       if (action === "set_bold") {
-        yield "[执行工具] 加粗文本: " + params.text + "\n";
-        yield "[执行] 加粗文本: " + params.text + " - 成功\n";
+        logLine = "[执行工具] 加粗文本: " + params.text + "\n";
+        yield logLine;
+        executionLog.push(logLine);
+        logLine = "[执行] 加粗文本: " + params.text + " - 成功\n";
+        yield logLine;
+        executionLog.push(logLine);
       } else if (action === "set_color") {
-        yield "[执行工具] 设置颜色: " + params.text + " 为 " + params.color + "\n";
-        yield "[执行] 设置颜色: " + params.text + " 为 " + params.color + " - 成功\n";
+        logLine = "[执行工具] 设置颜色: " + params.text + " 为 " + params.color + "\n";
+        yield logLine;
+        executionLog.push(logLine);
+        logLine = "[执行] 设置颜色: " + params.text + " 为 " + params.color + " - 成功\n";
+        yield logLine;
+        executionLog.push(logLine);
       } else if (action === "replace_text") {
-        yield "[执行工具] 替换文本: " + params.oldText + " -> " + params.newText + "\n";
+        logLine = "[执行工具] 替换文本: " + params.oldText + " -> " + params.newText + "\n";
+        yield logLine;
+        executionLog.push(logLine);
 
         var docId = this.docId;
         var replaceResult = await editor.replaceFirst(docId, params.oldText, params.newText);
         if (replaceResult.success) {
-          yield "[执行] 替换成功，替换了 " + replaceResult.replaced + " 处\n";
+          logLine = "[执行] 替换成功，替换了 " + replaceResult.replaced + " 处\n";
+          yield logLine;
+          executionLog.push(logLine);
         } else {
-          yield "[执行] 替换失败: " + replaceResult.message + "\n";
+          logLine = "[执行] 替换失败: " + replaceResult.message + "\n";
+          yield logLine;
+          executionLog.push(logLine);
         }
       } else if (action === "save") {
-        yield "[执行工具] 保存文档\n";
-        yield "[执行] 保存文档 - 成功\n";
+        logLine = "[执行工具] 保存文档\n";
+        yield logLine;
+        executionLog.push(logLine);
+        logLine = "[执行] 保存文档 - 成功\n";
+        yield logLine;
+        executionLog.push(logLine);
       }
     }
+
+    // 收集完整执行日志
+    state.execution_log = executionLog.join("");
   }
 }
