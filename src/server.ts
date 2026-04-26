@@ -1,4 +1,5 @@
 import express from "express";
+import Y from "yjs";
 import { Server } from "@hocuspocus/server";
 import config from "./config";
 
@@ -26,6 +27,14 @@ app.listen(PORT, () => {
 // ===== Hocuspocus Server (纯内存 Yjs) =====
 const hocuspocus = new Server({
   port: config.HOCUSPOCUS_PORT,
+
+  // 文档加载回调 - 当第一个客户端连接时创建空 Room
+  onLoadDocument: async (data: { documentName: string }) => {
+    const roomName = data.documentName;
+    console.log("[Hocuspocus] 加载/创建房间:", roomName);
+    // 返回新的空 Yjs Doc，room 会被自动创建
+    return new Y.Doc();
+  },
 
   // 连接回调
   onConnect: async (data: { documentName: string }) => {
