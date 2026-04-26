@@ -1,24 +1,40 @@
-const fs = require("fs");
-const path = require("path");
-const { v4: uuidv4 } = require("uuid");
-const { EventEmitter } = require("events");
+import fs from "fs";
+import path from "path";
+import { v4 as uuidv4 } from "uuid";
+import { EventEmitter } from "events";
 
-const UPLOAD_DIR = path.join(__dirname, "../../uploads");
+export const UPLOAD_DIR = path.join(__dirname, "../../uploads");
 
-const docEmitter = new EventEmitter();
+export const docEmitter = new EventEmitter();
 docEmitter.setMaxListeners(100);
 
-function ensureUploadDir() {
+function ensureUploadDir(): void {
   if (!fs.existsSync(UPLOAD_DIR)) {
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
   }
 }
 
-function generateFileId() {
+function generateFileId(): string {
   return uuidv4();
 }
 
-function saveDocument(file) {
+export interface DocumentMetadata {
+  id: string;
+  roomName: string;
+  originalName: string;
+  storedName: string;
+  size: number;
+  mimeType: string;
+  uploadedAt: string;
+  filePath: string;
+}
+
+export function saveDocument(file: {
+  originalname: string;
+  buffer: Buffer;
+  size: number;
+  mimetype: string;
+}): DocumentMetadata {
   ensureUploadDir();
 
   const fileId = generateFileId();
@@ -29,7 +45,7 @@ function saveDocument(file) {
   console.log("saveDocument 收到文件名:", file.originalname);
   fs.writeFileSync(filePath, file.buffer);
 
-  const metadata = {
+  const metadata: DocumentMetadata = {
     id: fileId,
     roomName: fileId,
     originalName: file.originalname,
@@ -46,7 +62,10 @@ function saveDocument(file) {
   return metadata;
 }
 
-function updateDocument(id, fileBuffer) {
+export function updateDocument(
+  id: string,
+  fileBuffer: Buffer
+): DocumentMetadata | null {
   const metadata = getDocumentById(id);
   if (!metadata) {
     return null;
@@ -64,17 +83,24 @@ function updateDocument(id, fileBuffer) {
   return metadata;
 }
 
-function createSSEHandler(req, res) {
+export interface SSEventSource {
+  setHeader(key: string, value: string): void;
+  flushHeaders(): void;
+  write(data: string): void;
+  end(): void;
+}
+
+export function createSSEHandler(req: { on: (event: string, cb: () => void) => void }, res: SSEventSource): void {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const onFileUpdated = (data) => {
+  const onFileUpdated = (data: { fileId: string; fileName: string }) => {
     res.write(`event: file_updated\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  const onFileDeleted = (data) => {
+  const onFileDeleted = (data: { fileId: string; fileName: string }) => {
     res.write(`event: file_deleted\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
@@ -88,11 +114,11 @@ function createSSEHandler(req, res) {
   });
 }
 
-function emitFileDeleted(data) {
+export function emitFileDeleted(data: { fileId: string; fileName: string }): void {
   docEmitter.emit("file_deleted", data);
 }
 
-function getDocumentList() {
+export function getDocumentList(): DocumentMetadata[] {
   ensureUploadDir();
 
   const files = fs.readdirSync(UPLOAD_DIR);
@@ -102,7 +128,7 @@ function getDocumentList() {
     .map((f) => {
       try {
         const content = fs.readFileSync(path.join(UPLOAD_DIR, f), "utf-8");
-        const doc = JSON.parse(content);
+        const doc = JSON.parse(content) as DocumentMetadata;
         if (!doc.roomName) {
           doc.roomName = doc.id;
         }
@@ -111,14 +137,14 @@ function getDocumentList() {
         return null;
       }
     })
-    .filter(Boolean);
+    .filter(Boolean) as DocumentMetadata[];
 
   return documents.sort(
-    (a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt)
+    (a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
   );
 }
 
-function getDocumentById(id) {
+export function getDocumentById(id: string): DocumentMetadata | null {
   const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
 
   if (!fs.existsSync(metadataPath)) {
@@ -127,7 +153,7 @@ function getDocumentById(id) {
 
   try {
     const content = fs.readFileSync(metadataPath, "utf-8");
-    const doc = JSON.parse(content);
+    const doc = JSON.parse(content) as DocumentMetadata;
     if (!doc.roomName) {
       doc.roomName = doc.id;
     }
@@ -137,7 +163,9 @@ function getDocumentById(id) {
   }
 }
 
-function getDocumentFile(id) {
+export function getDocumentFile(
+  id: string
+): { path: string; metadata: DocumentMetadata } | null {
   const metadata = getDocumentById(id);
 
   if (!metadata) {
@@ -156,7 +184,7 @@ function getDocumentFile(id) {
   };
 }
 
-function deleteDocument(id) {
+export function deleteDocument(id: string): boolean {
   const metadata = getDocumentById(id);
 
   if (!metadata) {
@@ -177,7 +205,7 @@ function deleteDocument(id) {
   return true;
 }
 
-function cleanupDocuments(keepIds) {
+export function cleanupDocuments(keepIds: string[]): number {
   const allDocs = getDocumentList();
   let deletedCount = 0;
 
@@ -199,16 +227,3 @@ function cleanupDocuments(keepIds) {
 
   return deletedCount;
 }
-
-module.exports = {
-  saveDocument,
-  getDocumentList,
-  getDocumentById,
-  getDocumentFile,
-  deleteDocument,
-  cleanupDocuments,
-  createSSEHandler,
-  emitFileDeleted,
-  docEmitter,
-  UPLOAD_DIR,
-};

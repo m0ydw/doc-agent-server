@@ -1,11 +1,12 @@
-const express = require("express");
-const router = express.Router();
+import express, { Request, Response, Router } from "express";
 
-const editor = require("../services/editor");
-const sessionManager = require("../services/session");
+import * as editor from "../services/editor";
+import * as sessionManager from "../services/session";
+
+const router: Router = express.Router();
 
 // 查找文本
-router.post("/find", async (req, res) => {
+router.post("/find", async (req: Request, res: Response) => {
   try {
     const { docId, pattern } = req.body;
     if (!docId || !pattern) {
@@ -21,12 +22,12 @@ router.post("/find", async (req, res) => {
     });
   } catch (error) {
     console.error("查找失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
 // 替换文本
-router.post("/replace", async (req, res) => {
+router.post("/replace", async (req: Request, res: Response) => {
   try {
     const { docId, targetText, replacement, replaceAll = false } = req.body;
     if (!docId || !targetText || !replacement) {
@@ -40,12 +41,12 @@ router.post("/replace", async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error("替换失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
 // 获取文档纯文本
-router.get("/text/:id", async (req, res) => {
+router.get("/text/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const text = await editor.getText(id);
@@ -55,12 +56,12 @@ router.get("/text/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("获取文本失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
 // 获取文档信息
-router.get("/info/:id", async (req, res) => {
+router.get("/info/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const info = await editor.getInfo(id);
@@ -70,31 +71,31 @@ router.get("/info/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("获取信息失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
 // 保存文档（触发 Yjs 同步）
-router.post("/save/:id", async (req, res) => {
+router.post("/save/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     await sessionManager.saveDocumentById(id);
     res.json({ success: true, message: "文档已保存" });
   } catch (error) {
     console.error("保存失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
 // 保存并关闭所有会话（供 cleanup 时调用，不暴露给前端）
-router.post("/save-all-sessions", async (req, res) => {
+router.post("/save-all-sessions", async (req: Request, res: Response) => {
   try {
     await sessionManager.closeAllSessions();
     res.json({ success: true, message: "所有会话已保存并关闭" });
   } catch (error) {
     console.error("保存会话失败:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
-module.exports = router;
+export default router;
