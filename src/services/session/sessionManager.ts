@@ -13,15 +13,15 @@ const HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
 // ===== SDK 句柄管理 =====
 
 /**
- * 通过文档 ID 获取会话信息
+ * 通过文档 ID 获取房间名
  */
 function resolveRoomName(docId: string, metadata: any) {
   return metadata?.roomName || docId;
 }
 
 /**
- * 获取或创建会话（无种子文件）
- * 适用于已有房间的情况（前端已创建或服务端已有种子）
+ * Agent 加入已有协作房间
+ * 使用 onMissing: "error" - 房间必须已存在（前端已打开）
  */
 export async function createOrUseSession(docId: string): Promise<{ sessionId: string; doc: Document }> {
   const metadata = getDocumentById(docId);
@@ -41,8 +41,9 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   const docPath = filePath.startsWith("/") ? filePath : `${DOCS_DIR}/${filePath}`;
 
   const sessionId = `session-${roomName}-${Date.now()}`;
-  console.log(`[SessionManager] 创建协作会话: ${sessionId} for ${docId}, room=${roomName}`);
+  console.log(`[SessionManager] Agent 加入房间: ${sessionId} for ${docId}, room=${roomName}`);
 
+  // 使用 onMissing: "error" - 必须加入已有房间，不能播种
   const doc = await openDocument({
     docPath,
     sessionId,
@@ -50,49 +51,11 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
       providerType: "hocuspocus",
       url: HOCUSPOCUS_URL,
       documentId: roomName,
-      onMissing: "useExisting", // 使用房间已有状态
+      onMissing: "error", // 房间必须已存在，否则报错
     },
   });
 
   sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now() });
-  return { sessionId, doc };
-}
-
-/**
- * 创建新会话并用种子文件播种
- * 适用于上传新文档时
- */
-export async function createOrUseSessionWithSeed(
-  docId: string,
-  seedFilePath: string
-): Promise<{ sessionId: string; doc: Document }> {
-  const roomName = docId;
-
-  // 检查是否有已有会话
-  if (sessions.has(docId)) {
-    const session = sessions.get(docId);
-    console.log(`[SessionManager] 使用已有会话: ${session.sessionId} for ${docId}`);
-    return { sessionId: session.sessionId, doc: session.doc };
-  }
-
-  const sessionId = `session-${roomName}-${Date.now()}`;
-  console.log(
-    `[SessionManager] 创建协作会话（带种子）: ${sessionId} for ${docId}, room=${roomName}`
-  );
-
-  // 使用种子文件播种
-  const doc = await openDocument({
-    docPath: seedFilePath,
-    sessionId,
-    collaboration: {
-      providerType: "hocuspocus",
-      url: HOCUSPOCUS_URL,
-      documentId: roomName,
-      onMissing: "seedFromDoc", // 从种子文件播种
-    },
-  });
-
-  sessions.set(docId, { sessionId, doc, docPath: seedFilePath, roomName, createdAt: Date.now() });
   return { sessionId, doc };
 }
 

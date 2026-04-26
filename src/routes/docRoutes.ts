@@ -96,7 +96,8 @@ const upload = multer({
 });
 
 /**
- * 上传文档并播种到 Yjs 协作房间
+ * 上传文档（只保存到磁盘，不连接协作）
+ * 用户打开文档时，前端编辑器会自动加载内容到 Yjs
  */
 router.post(
   "/upload",
@@ -113,7 +114,7 @@ router.post(
         // 解码文件名
         file.originalname = decodeFilename(file.originalname);
 
-        // 1. 保存临时种子文件，saveDocument 会生成 fileId 并存储
+        // 1. 保存文件到磁盘（保留，前端需要加载）
         const metadata = saveDocument({
           originalname: file.originalname,
           buffer: file.buffer,
@@ -121,29 +122,8 @@ router.post(
           mimetype: file.mimetype,
         });
 
-        // 临时文件路径
-        const tempFilePath = path.join(
-          __dirname,
-          "../../uploads",
-          metadata.storedName
-        );
-
-        try {
-          // 2. 使用 SDK 将种子文件播种到 Yjs 房间
-          console.log(`[DocRoutes] 播种种子文件: ${metadata.id}`);
-          await sessionManager.createOrUseSessionWithSeed(metadata.id, tempFilePath);
-        } finally {
-          // 3. 无论播种成功与否，清理临时文件
-          // 但保留元数据文件（.json），删除 .docx 临时文件
-          try {
-            if (fs.existsSync(tempFilePath)) {
-              fs.unlinkSync(tempFilePath);
-              console.log(`[DocRoutes] 已清理临时文件: ${tempFilePath}`);
-            }
-          } catch (cleanupError) {
-            console.warn("[DocRoutes] 临时文件清理失败:", (cleanupError as Error).message);
-          }
-        }
+        // 2. 保留文件，前端打开时会加载内容到 Yjs
+        // 不需要清理，文件存放在 UPLOAD_DIR
 
         // 返回协作信息
         results.push(
@@ -252,6 +232,37 @@ router.get("/:id", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("下载文件失败:", error);
     res.status(500).json({ error: "下载文件失败" });
+  }
+});
+
+/**
+ * 获取文件原始内容（供前端播种用）
+ */
+router.get("/:id/seed", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const result = getDocumentFile(id);
+
+    if (!result) {
+      return res.status(404).json({ error: "文件不存在" });
+    }
+
+    const filePath = result.path;
+    const metadata = result.metadata;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
+    );
+
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error("获取种子文件失败:", error);
+    res.status(500).json({ error: "获取种子文件失败" });
   }
 });
 
