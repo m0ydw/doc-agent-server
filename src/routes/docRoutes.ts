@@ -13,6 +13,7 @@ import {
   DocumentMetadata,
 } from "../services/docServices";
 import * as sessionManager from "../services/session";
+import { registerDocument, unregisterDocument } from "../services/fileRegistry";
 
 const router: Router = express.Router();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
@@ -62,6 +63,9 @@ router.post("/cleanup", async (req: Request, res: Response) => {
     await sessionManager.closeAllSessions();
     // 清理磁盘文件
     var deleted = cleanupDocuments(keepIds);
+    // 重新初始化文件映射表（cleanup 后重新扫描）
+    const { initFileRegistry } = await import("../services/fileRegistry");
+    initFileRegistry();
     res.json({ success: true, message: "清理完成", deleted: deleted });
   } catch (error) {
     console.error("清理文件失败:", error);
@@ -122,7 +126,10 @@ router.post(
           mimetype: file.mimetype,
         });
 
-        // 2. 保留文件，前端打开时会加载内容到 Yjs
+        // 2. 注册到文件映射表
+        registerDocument(metadata);
+
+        // 3. 保留文件，前端打开时会加载内容到 Yjs
         // 不需要清理，文件存放在 UPLOAD_DIR
 
         // 返回协作信息
@@ -303,6 +310,9 @@ router.delete("/:id", async (req: Request, res: Response) => {
 
     // 关闭 SDK 会话
     await sessionManager.closeSessionByDocId(id);
+
+    // 从文件映射表注销
+    unregisterDocument(id);
 
     const success = deleteDocument(id);
 

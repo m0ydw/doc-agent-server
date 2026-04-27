@@ -45,7 +45,7 @@ export class SingleDocAgent {
     this.doc_path = doc_path;
     this.analyzeTool = new AnalyzeTool(llm);
     this.planTool = new PlanTool(llm);
-    this.executeTool = new ExecuteTool(docId);
+    this.executeTool = new ExecuteTool();
     this.validateTool = new ValidateTool(llm);
   }
 
@@ -91,6 +91,7 @@ export class SingleDocAgent {
       var executeState: any = {
         plan: state.plan,
         execution_log: "",
+        targetDocId: this.docId,
       };
       var executeResult = await this.executeTool.execute(executeState);
       state.execution_log = executeResult.execution_log;
@@ -195,6 +196,7 @@ export class SingleDocAgent {
       var executeState: any = {
         plan: state.plan,
         execution_log: "",
+        targetDocId: this.docId,
       };
       yield "[执行阶段] 开始执行计划...\n";
       for await (var chunk of this.executeTool.streamExecute(executeState)) {

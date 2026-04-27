@@ -14,6 +14,8 @@ export interface ExecuteState {
   };
   /** 执行日志 输出参数 */
   execution_log?: string;
+  /** 目标文档 ID（由 Agent 在运行时动态确定） */
+  targetDocId?: string;
 }
 
 export interface ExecuteResult {
@@ -22,16 +24,20 @@ export interface ExecuteResult {
 }
 
 export class ExecuteTool {
-  private docId: string;
-
-  constructor(docId: string) {
-    this.docId = docId;
-  }
+  // 不再持有固定的 docId，改为从 ExecuteState 中获取 targetDocId
 
   async execute(state: ExecuteState): Promise<ExecuteResult> {
     var log = [];
     var thoughts = [];
     var steps = state.plan.steps;
+    var targetDocId = state.targetDocId;
+
+    if (!targetDocId) {
+      return {
+        execution_log: "[执行工具] 错误: 未指定目标文档 (targetDocId)\n",
+        thought: "执行失败：缺少目标文档 ID",
+      };
+    }
 
     for (var i = 0; i < steps.length; i++) {
       var step = steps[i];
@@ -51,15 +57,14 @@ export class ExecuteTool {
         thoughts.push("执行文本替换操作，将 '" + params.oldText + "' 替换为 '" + params.newText + "'");
         log.push("[执行] 替换文本: " + params.oldText + " -> " + params.newText + " - 成功");
 
-        var docId = this.docId;
-        var replaceResult = await editor.replaceFirst(docId, params.oldText, params.newText);
+        var replaceResult = await editor.replaceFirst(targetDocId, params.oldText, params.newText);
         if (replaceResult.success) {
           log.push("[执行] 替换成功，替换了 " + replaceResult.replaced + " 处");
         } else {
           log.push("[执行] 替换失败: " + replaceResult.message);
         }
       } else if (action === "save") {
-        thoughts.push("执行保存操作，保存文档: " + this.docId);
+        thoughts.push("执行保存操作，保存文档: " + targetDocId);
         log.push("[执行] 保存文档 - 成功");
       }
     }
@@ -73,11 +78,19 @@ export class ExecuteTool {
   async *streamExecute(state: ExecuteState): AsyncGenerator<string, void, unknown> {
     var steps = state.plan?.steps || [];
     var executionLog: string[] = [];
+    var targetDocId = state.targetDocId;
 
     if (steps.length === 0) {
       var msg = "[执行工具] 无步骤需要执行\n";
       yield msg;
       state.execution_log = msg;
+      return;
+    }
+
+    if (!targetDocId) {
+      var errMsg = "[执行工具] 错误: 未指定目标文档 (targetDocId)\n";
+      yield errMsg;
+      state.execution_log = errMsg;
       return;
     }
 
@@ -113,8 +126,7 @@ export class ExecuteTool {
         yield logLine;
         executionLog.push(logLine);
 
-        var docId = this.docId;
-        var replaceResult = await editor.replaceFirst(docId, params.oldText, params.newText);
+        var replaceResult = await editor.replaceFirst(targetDocId, params.oldText, params.newText);
         if (replaceResult.success) {
           logLine = "[执行] 替换成功，替换了 " + replaceResult.replaced + " 处\n";
           yield logLine;

@@ -41,6 +41,14 @@ if (fs.existsSync(uploadPath)) {
   console.log(`[启动] uploads 目录已清理，共 ${files.length} 个残留文件`);
 }
 
+// 初始化文件映射表（扫描已有文档）
+import { initFileRegistry } from "./services/fileRegistry";
+initFileRegistry();
+
+// 初始化全局 LLM Agent
+import { initGlobalAgent } from "./ai/agent/globalAgent";
+initGlobalAgent();
+
 // 创建协作服务实例
 const collaborationService = new SuperDocCollaboration({
   name: "doc-agent-collab",
