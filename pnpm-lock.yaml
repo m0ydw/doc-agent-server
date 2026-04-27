@@ -29,6 +29,9 @@ importers:
       '@superdoc-dev/sdk-windows-x64':
         specifier: 1.6.0-next.22
         version: 1.6.0-next.22
+      '@superdoc-dev/superdoc-yjs-collaboration':
+        specifier: ^1.0.2
+        version: 1.0.2
       axios:
         specifier: ^1.14.0
         version: 1.14.0
@@ -41,6 +44,9 @@ importers:
       langchain:
         specifier: ^1.3.4
         version: 1.3.4(@langchain/core@1.1.41(openai@6.34.0(ws@8.20.0)(zod@4.3.6))(ws@8.20.0))(openai@6.34.0(ws@8.20.0)(zod@4.3.6))(vue@3.5.32(typescript@5.9.3))(ws@8.20.0)
+      lib0:
+        specifier: ^0.2.117
+        version: 0.2.117
       multer:
         specifier: ^2.1.1
         version: 2.1.1
@@ -53,6 +59,12 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.20.0
+      y-protocols:
+        specifier: ^1.0.7
+        version: 1.0.7(yjs@13.6.30)
+      y-websocket:
+        specifier: ^3.0.0
+        version: 3.0.0(yjs@13.6.30)
       yjs:
         specifier: ^13.6.30
         version: 13.6.30
@@ -275,14 +287,35 @@ packages:
     os: [darwin]
     hasBin: true
 
+  '@superdoc-dev/sdk-linux-arm64@1.7.0':
+    resolution: {integrity: sha512-iW/ONqeGt091ux6mZtKpURki+7E0i3U/RdYRq8xUHYvUO4Sjm4pSuR4puPUoym18ub7H/ANnYNVabcxG7ZuNSg==}
+    cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@superdoc-dev/sdk-linux-x64@1.7.0':
+    resolution: {integrity: sha512-QlQzoRV1GZzPEoASzY0wBbDx8+TaxHcBDRE2RYO1uBrLOQdnOoa/rCwFJ9qEp0XJEBg0X62cBZQik9YqdMDaeA==}
+    cpu: [x64]
+    os: [linux]
+    hasBin: true
+
   '@superdoc-dev/sdk-windows-x64@1.6.0-next.22':
     resolution: {integrity: sha512-Y5qk6FkXmCRNCxcPwjjac9uRYELaEd9iYik2XCKkuQOgLtLsuYDxs1YGx4qBA+fxtk6iJ5PUe5esTnqUJN0Hnw==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
+  '@superdoc-dev/sdk-windows-x64@1.7.0':
+    resolution: {integrity: sha512-83kFLbMXPunfb4vcLpUfZdCKzR9F4L1wxYAV1lGdeTUZzvFSZPyVMEusylJc5Ko29VeSE2iumywO2/kFAD2pZA==}
+    cpu: [x64]
+    os: [win32]
+    hasBin: true
+
   '@superdoc-dev/sdk@1.7.0':
     resolution: {integrity: sha512-OQeyR34FqYZN6M8jBLCK9nj9D7AeNCwen9I3jHkraZhHRZbLU8obSN16Te6WKs6qNBW9I2e9wZpgngQvTEsxSQ==}
+
+  '@superdoc-dev/superdoc-yjs-collaboration@1.0.2':
+    resolution: {integrity: sha512-bmTCS3xMSIfvWL8V7is9IR/MxWhkLUlaxJy7J/1/u8m1wP/cQLznzmK2kF0egslz3odH7DCG3ag0Tr6i8u9ySA==}
 
   '@tsconfig/node10@1.0.12':
     resolution: {integrity: sha512-UCYBaeFvM11aU2y3YPZ//O5Rhj+xKyzy7mvcIoAjASbigy8mHMryP5cK7dgjlz2hWxh1g5pLw084E0a/wlUSFQ==}
@@ -1609,12 +1642,26 @@ snapshots:
   '@superdoc-dev/sdk-darwin-x64@1.7.0':
     optional: true
 
+  '@superdoc-dev/sdk-linux-arm64@1.7.0':
+    optional: true
+
+  '@superdoc-dev/sdk-linux-x64@1.7.0':
+    optional: true
+
   '@superdoc-dev/sdk-windows-x64@1.6.0-next.22': {}
+
+  '@superdoc-dev/sdk-windows-x64@1.7.0':
+    optional: true
 
   '@superdoc-dev/sdk@1.7.0':
     optionalDependencies:
       '@superdoc-dev/sdk-darwin-arm64': 1.7.0
       '@superdoc-dev/sdk-darwin-x64': 1.7.0
+      '@superdoc-dev/sdk-linux-arm64': 1.7.0
+      '@superdoc-dev/sdk-linux-x64': 1.7.0
+      '@superdoc-dev/sdk-windows-x64': 1.7.0
+
+  '@superdoc-dev/superdoc-yjs-collaboration@1.0.2': {}
 
   '@tsconfig/node10@1.0.12': {}
 

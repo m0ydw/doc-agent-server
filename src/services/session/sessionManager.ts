@@ -43,17 +43,14 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   const sessionId = `session-${roomName}-${Date.now()}`;
   console.log(`[SessionManager] Agent 加入房间: ${sessionId} for ${docId}, room=${roomName}`);
 
-  // SDK 加入协作房间 — 使用 collaboration 对象 + providerType: "hocuspocus"
-  // 确保 CLI 走 Hocuspocus 协议（含认证握手），而非 y-websocket 裸连接
+  // SDK 加入协作房间 — 使用 collabUrl 简写（默认走 y-websocket 协议）
+  // 服务端已从 @hocuspocus/server 切换到 y-websocket（通过 @superdoc-dev/superdoc-yjs-collaboration）
   try {
     const doc = await openDocument({
       docPath,
       sessionId,
-      collaboration: {
-        providerType: "hocuspocus",
-        url: HOCUSPOCUS_URL,
-        documentId: roomName,
-      },
+      collabUrl: HOCUSPOCUS_URL,
+      collabDocumentId: roomName,
     });
 
     sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now() });
