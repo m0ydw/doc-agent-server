@@ -236,7 +236,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 });
 
 /**
- * 获取文件原始内容（供前端播种用）
+ * 获取文件原始内容（供前端播种用），获取后删除源文件
  */
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
@@ -259,7 +259,21 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
     );
 
-    res.sendFile(filePath);
+    // 发送文件后删除
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        console.error("[Seed] 发送文件失败:", err.message);
+      } else {
+        console.log("[Seed]播种完成，删除源文件:", filePath);
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+        } catch (cleanupErr) {
+          console.warn("[Seed] 删除文件失败:", (cleanupErr as Error).message);
+        }
+      }
+    });
   } catch (error) {
     console.error("获取种子文件失败:", error);
     res.status(500).json({ error: "获取种子文件失败" });

@@ -25,25 +25,42 @@ app.listen(PORT, () => {
 });
 
 // ===== Hocuspocus Server (纯内存 Yjs) =====
+
+// 文档实例缓存 Map — 确保同一房间的文档实例被复用
+const docsCache = new Map<string, Y.Doc>();
+
 const hocuspocus = new Server({
   port: config.HOCUSPOCUS_PORT,
 
-  // 文档加载回调 - 当第一个客户端连接时创建空 Room
-  onLoadDocument: async (data: { documentName: string }) => {
-    const roomName = data.documentName;
-    console.log("[Hocuspocus] 加载/创建房间:", roomName);
-    // 返回新的空 Yjs Doc，room 会被自动创建
-    return new Y.Doc();
+  // 文档加载回调 - 复用已有文档实例，确保 sync 正常握手
+  onLoadDocument: async (data) => {
+    const { documentName } = data;
+    if (!docsCache.has(documentName)) {
+      docsCache.set(documentName, new Y.Doc());
+      console.log(`[Hocuspocus] 创建新文档: ${documentName}`);
+    }
+    const doc = docsCache.get(documentName)!;
+    console.log(`[Hocuspocus] 返回已有文档: ${documentName}`);
+    return doc;
   },
 
   // 连接回调
-  onConnect: async (data: { documentName: string }) => {
+  onConnect: async (data) => {
     console.log("[Hocuspocus] 新连接:", data.documentName);
   },
 
   // 文档变化回调
-  onChange: async (data: { documentName: string; document: any }) => {
-    console.log("[Hocuspocus] 文档变化:", data.documentName);
+  onChange: async (data) => {
+    console.log(`[Hocuspocus] 文档 ${data.documentName} 发生变更，当前客户端数: ${data.clientsCount ?? 'unknown'}`);
+  },
+
+  // 断开连接回调 - 可选项：清理空房间
+  onDisconnect: async (data) => {
+    // 连接数归零时清理缓存（可根据实际场景决定是否启用）
+    if (data.clientsCount === 0) {
+      // 保留最近使用的文档以便回访
+      // docsCache.delete(data.documentName);
+    }
   },
 });
 

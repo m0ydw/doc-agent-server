@@ -52,6 +52,7 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
       url: HOCUSPOCUS_URL,
       documentId: roomName,
       onMissing: "error", // 房间必须已存在，否则报错
+      bootstrapSettlingMs: 5000, // 延长握手等待时间，从默认1500增加到5000ms
     },
   });
 

@@ -40,6 +40,7 @@ export interface OpenParams {
     url?: string;
     documentId?: string;
     onMissing?: string;
+    bootstrapSettlingMs?: number;
   };
 }
 
