@@ -172,6 +172,7 @@ router.get("/list", async (req: Request, res: Response) => {
 
 /**
  * 打开文档（加入协作房间）
+ * 前端负责播种 Y.Doc，后端仅返回房间信息
  */
 router.post("/:id/open", async (req: Request, res: Response) => {
   try {
@@ -182,7 +183,7 @@ router.post("/:id/open", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    // 加入 Yjs 协作房间
+    // 返回 Yjs 协作房间信息（不调 SDK，前端负责播种）
     const roomInfo = await sessionManager.ensureYjsRoom(id);
 
     res.json({
@@ -236,7 +237,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 });
 
 /**
- * 获取文件原始内容（供前端播种用），获取后删除源文件
+ * 获取文件原始内容（供前端播种用），保留源文件
  */
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
@@ -259,21 +260,8 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
     );
 
-    // 发送文件后删除
-    res.sendFile(filePath, (err) => {
-      if (err) {
-        console.error("[Seed] 发送文件失败:", err.message);
-      } else {
-        console.log("[Seed]播种完成，删除源文件:", filePath);
-        try {
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (cleanupErr) {
-          console.warn("[Seed] 删除文件失败:", (cleanupErr as Error).message);
-        }
-      }
-    });
+    // 仅发送文件，不再删除源文件（后续 SDK 会话复用）
+    res.sendFile(filePath);
   } catch (error) {
     console.error("获取种子文件失败:", error);
     res.status(500).json({ error: "获取种子文件失败" });

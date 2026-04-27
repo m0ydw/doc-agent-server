@@ -26,6 +26,21 @@ app.listen(PORT, () => {
 
 // ===== Hocuspocus Server (纯内存 Yjs) =====
 
+// 启动时清理 uploads 目录（清除上次会话的残留文件）
+import fs from "fs";
+import path from "path";
+const uploadPath = path.resolve(UPLOAD_DIR);
+if (fs.existsSync(uploadPath)) {
+  const files = fs.readdirSync(uploadPath);
+  for (const file of files) {
+    const filePath = path.join(uploadPath, file);
+    if (fs.statSync(filePath).isFile()) {
+      fs.unlinkSync(filePath);
+    }
+  }
+  console.log(`[启动] uploads 目录已清理，共 ${files.length} 个残留文件`);
+}
+
 // 文档实例缓存 Map — 确保同一房间的文档实例被复用
 const docsCache = new Map<string, Y.Doc>();
 

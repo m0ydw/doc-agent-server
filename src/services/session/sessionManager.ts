@@ -43,7 +43,7 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   const sessionId = `session-${roomName}-${Date.now()}`;
   console.log(`[SessionManager] Agent 加入房间: ${sessionId} for ${docId}, room=${roomName}`);
 
-  // 使用 onMissing: "error" - 必须加入已有房间，不能播种
+  // 使用 onMissing: "error" - 房间必须先由前端播种，SDK 作为消费者加入
   const doc = await openDocument({
     docPath,
     sessionId,
@@ -51,8 +51,8 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
       providerType: "hocuspocus",
       url: HOCUSPOCUS_URL,
       documentId: roomName,
-      onMissing: "error", // 房间必须已存在，否则报错
-      bootstrapSettlingMs: 5000, // 延长握手等待时间，从默认1500增加到5000ms
+      onMissing: "error",
+      bootstrapSettlingMs: 5000,
     },
   });
 
