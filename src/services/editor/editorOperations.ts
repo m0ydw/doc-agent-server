@@ -104,11 +104,3 @@ export async function getDocumentInfo(docId: string): Promise<any> {
     throw new Error("获取信息失败: " + e.message);
   }
 }
-
-export async function insertText(docId: string, text: string, position: string): Promise<any> {
-  return { success: false, message: "预留接口" };
-}
-
-export async function deleteText(docId: string, start: string, end: string): Promise<any> {
-  return { success: false, message: "预留接口" };
-}

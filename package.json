@@ -5,9 +5,6 @@
     "lint": "eslint . --ext .ts"
   },
   "dependencies": {
-    "@hocuspocus/extension-database": "^3.4.4",
-    "@hocuspocus/provider": "^3.4.4",
-    "@hocuspocus/server": "^3.4.4",
     "@langchain/core": "^1.1.41",
     "@langchain/openai": "^1.4.4",
     "@superdoc-dev/sdk": "^1.7.0",
@@ -17,15 +14,9 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "langchain": "^1.3.4",
-    "lib0": "^0.2.117",
     "multer": "^2.1.1",
-    "superdoc": "^1.26.0",
     "uuid": "^13.0.0",
-    "ws": "^8.20.0",
-    "y-protocols": "^1.0.7",
-    "y-websocket": "^3.0.0",
-    "yjs": "^13.6.30",
-    "zhipuai": "^2.0.0"
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

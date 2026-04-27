@@ -8,9 +8,7 @@ import { getDocumentById } from "../docServices";
 import config from "../../config";
 
 const sessions = new Map<string, any>();
-const HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
-
-// ===== SDK 句柄管理 =====
+const COLLAB_WS_URL = config.COLLAB_WS_URL;
 
 /**
  * 通过文档 ID 获取房间名
@@ -20,8 +18,7 @@ function resolveRoomName(docId: string, metadata: any) {
 }
 
 /**
- * Agent 加入已有协作房间
- * 使用 onMissing: "error" - 房间必须已存在（前端已打开）
+ * Agent 加入已有协作房间（y-websocket 协议）
  */
 export async function createOrUseSession(docId: string): Promise<{ sessionId: string; doc: Document }> {
   const metadata = getDocumentById(docId);
@@ -43,13 +40,11 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   const sessionId = `session-${roomName}-${Date.now()}`;
   console.log(`[SessionManager] Agent 加入房间: ${sessionId} for ${docId}, room=${roomName}`);
 
-  // SDK 加入协作房间 — 使用 collabUrl 简写（默认走 y-websocket 协议）
-  // 服务端已从 @hocuspocus/server 切换到 y-websocket（通过 @superdoc-dev/superdoc-yjs-collaboration）
   try {
     const doc = await openDocument({
       docPath,
       sessionId,
-      collabUrl: HOCUSPOCUS_URL,
+      collabUrl: COLLAB_WS_URL,
       collabDocumentId: roomName,
     });
 
@@ -68,44 +63,6 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   }
 }
 
-// ===== 会话查询 =====
-
-/**
- * 获取 SDK 文档句柄
- */
-export function getSessionDoc(docId: string): Document | null {
-  const session = sessions.get(docId);
-  return session ? session.doc : null;
-}
-
-/**
- * 获取完整会话信息
- */
-export function getSession(docId: string): any {
-  const session = sessions.get(docId);
-  if (!session) return null;
-  return {
-    sessionId: session.sessionId,
-    doc: session.doc,
-    docPath: session.docPath,
-    roomName: session.roomName,
-  };
-}
-
-/**
- * 检查会话是否存在
- */
-export function hasSession(docId: string): boolean {
-  return sessions.has(docId);
-}
-
-/**
- * 获取所有活跃会话的文档 ID
- */
-export function getActiveSessionDocIds(): string[] {
-  return Array.from(sessions.keys());
-}
-
 /**
  * 获取协作房间信息
  */
@@ -115,10 +72,8 @@ export async function ensureYjsRoom(
   const metadata = getDocumentById(docId);
   if (!metadata) throw new Error(`文档不存在: ${docId}`);
   const roomName = resolveRoomName(docId, metadata);
-  return { docId, roomName, wsUrl: HOCUSPOCUS_URL };
+  return { docId, roomName, wsUrl: COLLAB_WS_URL };
 }
-
-// ===== 会话关闭 =====
 
 /**
  * 关闭单个会话

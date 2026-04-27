@@ -49,7 +49,7 @@ const collaborationService = new SuperDocCollaboration({
 });
 
 // WebSocket 服务端
-const wss = new WebSocketServer({ port: config.HOCUSPOCUS_PORT });
+const wss = new WebSocketServer({ port: config.COLLAB_WS_PORT });
 
 wss.on("connection", (ws, req) => {
   const roomName = req.url?.slice(1) || "default";
@@ -67,6 +67,6 @@ wss.on("error", (err) => {
   console.error(`[Collab] 服务器错误: ${err.message}`);
 });
 
-console.log(`SuperDoc 协作服务已启动（端口 ${config.HOCUSPOCUS_PORT}）`);
-console.log(`协作地址：${config.HOCUSPOCUS_URL}`);
+console.log(`SuperDoc 协作服务已启动（端口 ${config.COLLAB_WS_PORT}）`);
+console.log(`协作地址：${config.COLLAB_WS_URL}`);
 // ========================================

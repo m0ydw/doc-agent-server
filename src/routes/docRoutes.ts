@@ -15,7 +15,7 @@ import {
 import * as sessionManager from "../services/session";
 
 const router: Router = express.Router();
-const HOCUSPOCUS_URL = config.HOCUSPOCUS_URL;
+const COLLAB_WS_URL = config.COLLAB_WS_URL;
 
 // ===== 文件名解码 =====
 function decodeFilename(filename: string): string {
@@ -34,7 +34,7 @@ function decodeFilename(filename: string): string {
 
 function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: string; wsUrl: string }) {
   const roomName = roomInfo?.roomName || document.roomName || document.id;
-  const wsUrl = roomInfo?.wsUrl || HOCUSPOCUS_URL;
+  const wsUrl = roomInfo?.wsUrl || COLLAB_WS_URL;
 
   return {
     ...document,
@@ -129,7 +129,7 @@ router.post(
         results.push(
           withCollaboration(metadata, {
             roomName: metadata.id,
-            wsUrl: HOCUSPOCUS_URL,
+            wsUrl: COLLAB_WS_URL,
           })
         );
       }
@@ -155,7 +155,7 @@ router.get("/list", async (req: Request, res: Response) => {
     const mappedDocuments = documents.map((doc) =>
       withCollaboration(doc, {
         roomName: doc.id,
-        wsUrl: HOCUSPOCUS_URL,
+        wsUrl: COLLAB_WS_URL,
       })
     );
 
@@ -284,7 +284,7 @@ router.get("/:id/info", async (req: Request, res: Response) => {
       success: true,
       document: withCollaboration(document, {
         roomName: document.id,
-        wsUrl: HOCUSPOCUS_URL,
+        wsUrl: COLLAB_WS_URL,
       }),
     });
   } catch (error) {
