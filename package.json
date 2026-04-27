@@ -1,6 +1,7 @@
 {
   "scripts": {
     "dev": "ts-node src/server.ts",
+    "ninja": "console-ninja ts-node src/server.ts",
     "build": "tsc",
     "lint": "eslint . --ext .ts"
   },
