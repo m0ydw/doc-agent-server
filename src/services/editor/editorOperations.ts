@@ -48,7 +48,6 @@ export async function replaceFirst(docId: string, targetText: string, replacemen
     if (!refValue) throw new Error("无法获取替换位置");
     var stepsArray = [{ id: "replace-1", op: "text.rewrite", where: { by: "ref", ref: refValue }, args: { replacement: { text: replacement } }}];
     var applyParams = {
-      expectedRevision: matchResult.evaluatedRevision,
       atomic: true,
       steps: stepsArray,
     };
@@ -75,7 +74,7 @@ export async function replaceAll(docId: string, targetText: string, replacement:
       stepsArray.push({ id: "replace-" + i, op: "text.rewrite", where: { by: "ref", ref: ref }, args: { replacement: { text: replacement } } });
     }
     if (stepsArray.length === 0) return { success: true, replaced: 0 };
-    await doc.mutations.apply({ expectedRevision: matchResult.evaluatedRevision, atomic: true, steps: stepsArray });
+    await doc.mutations.apply({ atomic: true, steps: stepsArray });
     console.log("[Editor] 替换全部: " + targetText + " -> " + replacement + " - 替换了 " + stepsArray.length + " 处");
     return { success: true, replaced: stepsArray.length };
   } catch (e) {
