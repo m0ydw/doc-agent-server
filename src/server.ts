@@ -49,7 +49,12 @@ const hocuspocus = new Server({
 
   // 文档加载回调 - 复用已有文档实例，确保 sync 正常握手
   onLoadDocument: async (data) => {
-    const { documentName } = data;
+    const { documentName, requestHeaders, socketId } = data;
+    console.log(`[Hocuspocus] 文档请求: ${documentName}, socketId: ${socketId ?? 'unknown'}`);
+    if (requestHeaders) {
+      console.log(`[Hocuspocus] 请求头:`, JSON.stringify(requestHeaders));
+    }
+
     if (!docsCache.has(documentName)) {
       docsCache.set(documentName, new Y.Doc());
       console.log(`[Hocuspocus] 创建新文档: ${documentName}`);
@@ -61,16 +66,34 @@ const hocuspocus = new Server({
 
   // 连接回调
   onConnect: async (data) => {
-    console.log("[Hocuspocus] 新连接:", data.documentName);
+    const { documentName, request, requestHeaders, socketId } = data;
+    console.log(`[Hocuspocus] ===== 新连接 =====`);
+    console.log(`[Hocuspocus] 文档名称: ${documentName}`);
+    console.log(`[Hocuspocus] socketId: ${socketId ?? 'unknown'}`);
+    console.log(`[Hocuspocus] 请求 URL: ${request?.url ?? 'unknown'}`);
+    if (requestHeaders) {
+      console.log(`[Hocuspocus] 请求头:`);
+      for (const [key, value] of Object.entries(requestHeaders)) {
+        console.log(`[Hocuspocus]   ${key}: ${value}`);
+      }
+    }
+    try {
+      const peer = (request?.socket as any)?.remoteAddress;
+      if (peer) console.log(`[Hocuspocus] 远程地址: ${peer}`);
+    } catch {}
+    console.log(`[Hocuspocus] ===== 连接处理完成 =====`);
   },
 
   // 文档变化回调
   onChange: async (data) => {
-    console.log(`[Hocuspocus] 文档 ${data.documentName} 发生变更，当前客户端数: ${data.clientsCount ?? 'unknown'}`);
+    console.log(`[Hocuspocus] 文档 ${data.documentName} 发生变更，当前客户端数: ${data.clientsCount}`);
   },
 
-  // 断开连接回调 - 可选项：清理空房间
+  // 断开连接回调
   onDisconnect: async (data) => {
+    console.log(`[Hocuspocus] ===== 断开连接 =====`);
+    console.log(`[Hocuspocus] 文档: ${data.documentName}`);
+    console.log(`[Hocuspocus] 剩余客户端数: ${data.clientsCount}`);
     // 连接数归零时清理缓存（可根据实际场景决定是否启用）
     if (data.clientsCount === 0) {
       // 保留最近使用的文档以便回访

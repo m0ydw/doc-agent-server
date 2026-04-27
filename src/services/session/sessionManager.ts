@@ -43,21 +43,32 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
   const sessionId = `session-${roomName}-${Date.now()}`;
   console.log(`[SessionManager] Agent 加入房间: ${sessionId} for ${docId}, room=${roomName}`);
 
-  // 使用 onMissing: "error" - 房间必须先由前端播种，SDK 作为消费者加入
-  const doc = await openDocument({
-    docPath,
-    sessionId,
-    collaboration: {
-      providerType: "hocuspocus",
-      url: HOCUSPOCUS_URL,
-      documentId: roomName,
-      onMissing: "error",
-      bootstrapSettlingMs: 5000,
-    },
-  });
+  // SDK 加入协作房间 — 使用 collaboration 对象 + providerType: "hocuspocus"
+  // 确保 CLI 走 Hocuspocus 协议（含认证握手），而非 y-websocket 裸连接
+  try {
+    const doc = await openDocument({
+      docPath,
+      sessionId,
+      collaboration: {
+        providerType: "hocuspocus",
+        url: HOCUSPOCUS_URL,
+        documentId: roomName,
+      },
+    });
 
-  sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now() });
-  return { sessionId, doc };
+    sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now() });
+    return { sessionId, doc };
+  } catch (error: any) {
+    const isTimeout = error?.code === 'COLLABORATION_SYNC_TIMEOUT'
+      || error?.code === 'HOST_WATCHDOG_TIMEOUT'
+      || (error?.message && typeof error.message === 'string' && 
+          (error.message.includes('sync timed out') || error.message.includes('watchdog timed') || error.message.includes('request timed out')));
+    if (isTimeout) {
+      console.warn(`[SessionManager] 协作超时，重置 SDK 客户端: ${error.message}`);
+      await disposeClient();
+    }
+    throw error;
+  }
 }
 
 // ===== 会话查询 =====

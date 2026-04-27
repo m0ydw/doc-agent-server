@@ -15,11 +15,19 @@ async function getClient(): Promise<any> {
   const superdoc = await import("@superdoc-dev/sdk");
   const createSuperDocClient = superdoc.createSuperDocClient;
 
-  client = createSuperDocClient();
+  client = createSuperDocClient({
+    env: {
+      SUPERDOC_DEBUG_TEXT_REWRITE: "1",
+    },
+    user: { name: "Agent", email: "agent@local" },
+    // Hocuspocus 协议握手 + 同步可能耗时，调大超时避免 SDK 提前截杀
+    requestTimeoutMs: 90000,
+    watchdogTimeoutMs: 90000,
+  });
   await client.connect();
   isConnected = true;
 
-  console.log("[SDK] Client connected");
+  console.log("[SDK] Client connected (timeout=90s)");
   return client;
 }
 
@@ -40,8 +48,14 @@ export interface OpenParams {
     url?: string;
     documentId?: string;
     onMissing?: string;
+    syncTimeoutMs?: number;
     bootstrapSettlingMs?: number;
   };
+  // 缩略参数（避免 CLI --collaboration-json JSON 解析导致进程挂死）
+  collabUrl?: string;
+  collabDocumentId?: string;
+  onMissing?: string;
+  bootstrapSettlingMs?: number;
 }
 
 export interface Document {
@@ -58,7 +72,7 @@ export interface Document {
 }
 
 async function openDocument(params: OpenParams): Promise<Document> {
-  const { docPath, sessionId, collaboration } = params;
+  const { docPath, sessionId, collaboration, collabUrl, collabDocumentId, onMissing, bootstrapSettlingMs } = params;
   const sdkClient = await getClient();
 
   const openPayload: any = { doc: docPath };
@@ -67,12 +81,19 @@ async function openDocument(params: OpenParams): Promise<Document> {
     openPayload.sessionId = sessionId;
   }
 
-  if (collaboration) {
+  // 缩略参数优先（简单 CLI flag，避免 --collaboration-json JSON 解析 bug）
+  if (collabUrl) {
+    openPayload.collabUrl = collabUrl;
+    if (collabDocumentId) openPayload.collabDocumentId = collabDocumentId;
+    if (onMissing) openPayload.onMissing = onMissing;
+    if (bootstrapSettlingMs) openPayload.bootstrapSettlingMs = bootstrapSettlingMs;
+  } else if (collaboration) {
     openPayload.collaboration = collaboration;
   }
 
   const doc = await sdkClient.open(openPayload);
-  console.log(`[SDK] Document opened: ${docPath}`);
+  const roomId = collabUrl ? (collabDocumentId ?? 'none') : (collaboration?.documentId ?? 'none');
+  console.log(`[SDK] Document opened: ${docPath} room=${roomId}`);
   return doc;
 }
 
