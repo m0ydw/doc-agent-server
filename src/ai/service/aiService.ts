@@ -34,16 +34,9 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     var agent = getGlobalAgent();
 
     if (!agent.isInitialized) {
-      // 尝试用请求中的配置初始化
-      var modelConfig = body.model_config || {};
-      agent.initialize({
-        apiKey: modelConfig.apiKey || process.env.ZHIPUAI_API_KEY,
-        modelName: modelConfig.model || "glm-4-flash",
-        temperature: modelConfig.temperature || 0.1,
-      });
-
+      agent.initialize();
       if (!agent.isInitialized) {
-        res.status(500).write("错误: Agent 未初始化，请检查 ZHIPUAI_API_KEY 配置");
+        res.status(500).write("错误: Agent 未初始化，请配置 API Key（检查 .env 文件）");
         res.end();
         return;
       }

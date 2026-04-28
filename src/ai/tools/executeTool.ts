@@ -170,17 +170,30 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
   async _call(input: z.infer<typeof ExecuteInputSchema>): Promise<string> {
     this.docId = input.docId;
 
-    // 解析任务清单
+    // 解析任务清单（支持 JSON 和纯文本描述两种格式）
     let tasks: any[] = [];
+    let planDescription = input.plan_tasks; // 保留原始文本，供降级使用
     try {
       const planOutput = JSON.parse(input.plan_tasks);
       tasks = planOutput.tasks || [];
     } catch {
-      return JSON.stringify({
-        execution_log: "[Execute] 错误: 无法解析 plan_tasks JSON",
-        task_status: {},
-        success: false,
-      } as ExecuteResult);
+      // JSON 解析失败 → 降级：从原始文本中尝试提取任务，或直接作为描述传给 LLM
+      console.warn(
+        "[ExecuteTool] plan_tasks JSON 解析失败，尝试降级处理，" +
+        "plan_len=" + (input.plan_tasks || "").length +
+        ", plan_head=" + (input.plan_tasks || "").slice(0, 120).replace(/\n/g, "\\n")
+      );
+      // 尝试从文本中提取大括号包裹的 JSON
+      var jsonMatch = input.plan_tasks.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          var extracted = JSON.parse(jsonMatch[0]);
+          tasks = extracted.tasks || [];
+          if (tasks.length > 0) {
+            console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + tasks.length);
+          }
+        } catch { /* 二次提取也失败，继续降级 */ }
+      }
     }
 
     if (tasks.length === 0) {
