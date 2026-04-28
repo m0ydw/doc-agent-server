@@ -68,10 +68,24 @@ const ExecuteInputSchema = z.object({
 /** 最大 tool calling 轮数，防止无限循环 */
 const MAX_TOOL_ROUNDS = 30;
 
+/** 单次工具调用记录 */
+export interface ToolCallRecord {
+  /** 工具名，如 sdk_get_text */
+  tool: string;
+  /** 调用参数（JSON 字符串） */
+  args: string;
+  /** 工具执行结果摘要 */
+  result: string;
+  /** 执行状态 */
+  status: "success" | "failed";
+}
+
 /** 最终执行结果 */
 export interface ExecuteResult {
-  /** 执行日志，记录每一步的操作和结果 */
+  /** 执行日志，记录每一步的操作和结果（保留向后兼容） */
   execution_log: string;
+  /** 结构化的工具调用记录列表（供前端组件渲染） */
+  tool_calls: ToolCallRecord[];
   /** 每个任务的执行状态 */
   task_status: Record<string, "success" | "failed" | "skipped">;
   /** 是否完全成功 */
@@ -194,6 +208,7 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
     ];
 
     const log: string[] = [];
+    const toolCalls: ToolCallRecord[] = [];
     let taskStatus: Record<string, "success" | "failed" | "skipped"> = {};
 
     // tool calling 循环
@@ -222,11 +237,19 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
             // editor 函数通过 sessionManager 获取 doc 对象 → 调用 SDK API
             // ================================================================
             const result = await tool.invoke(toolArgs);
-            log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${result.toString().slice(0, 200)}`);
+            const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+            log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${resultStr.slice(0, 200)}`);
+
+            // 记录结构化工具调用（供前端组件渲染）
+            toolCalls.push({
+              tool: toolName,
+              args: JSON.stringify(toolArgs),
+              result: resultStr.slice(0, 300),
+              status: "success",
+            });
 
             // 记录任务状态：如果是 sdk_replace_text 或 sdk_replace_all，标记对应任务
             if (toolName === "sdk_replace_text" || toolName === "sdk_replace_all") {
-              // 查找当前正在执行的任务（根据日志推断）
               const taskMatch = response.content?.toString().match(/任务[：:]\s*([^\n]+)/);
               if (taskMatch) {
                 taskStatus[taskMatch[1]] = "success";
@@ -235,12 +258,18 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
 
             // 将工具执行结果返回给 LLM
             messages.push(new ToolMessage({
-              content: typeof result === "string" ? result : JSON.stringify(result),
+              content: resultStr,
               tool_call_id: toolId!,
             }));
           } catch (err: any) {
             const errMsg = `[工具] ${toolName} 执行失败: ${err.message}`;
             log.push(errMsg);
+            toolCalls.push({
+              tool: toolName,
+              args: JSON.stringify(toolArgs),
+              result: err.message,
+              status: "failed",
+            });
             messages.push(new ToolMessage({
               content: `操作失败: ${err.message}`,
               tool_call_id: toolId!,
@@ -279,6 +308,7 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
 
     const result: ExecuteResult = {
       execution_log: log.join("\n"),
+      tool_calls: toolCalls,
       task_status: taskStatus,
       success,
     };

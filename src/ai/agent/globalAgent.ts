@@ -210,44 +210,34 @@ class GlobalAgent {
    */
   async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
     if (!this.initialized || !this.llm) {
-      yield "[全局Agent] 错误: Agent 未初始化，请先配置 API Key\n";
+      yield "[error]Agent 未初始化，请先配置 API Key\n";
       return;
     }
 
     var userInput = params.message;
     var contextDocId = params.contextDocId;
-
-    // 获取文档上下文
     var docContext = fileRegistry.toContextString(contextDocId);
-    yield "[event:doc_list] " + docContext.replace(/\n/g, "\n") + "\n";
 
-    // 自动确定目标文档
+    // 确定目标文档
     var targetDocId = this.resolveTargetDocId(userInput, contextDocId);
-
     if (!targetDocId) {
-      yield "\n" + "=".repeat(50) + "\n";
-      yield "⚠️ 无法确定目标文档\n";
-      yield "当前没有可操作的文档，请先上传 .docx 文件。\n";
-      yield "=".repeat(50) + "\n";
+      yield "[error]无法确定目标文档，请先上传 .docx 文件\n";
       return;
     }
 
-    var targetEntry = fileRegistry.get(targetDocId);
-    var targetName = targetEntry ? targetEntry.originalName : targetDocId;
-    yield "[目标文档] " + targetName + " (" + targetDocId + ")\n\n";
+    var targetName = (fileRegistry.get(targetDocId)?.originalName) || targetDocId;
+    yield "[phase:start]doc_target|" + targetName + "\n";
 
     // ===== Agent 主循环（支持重试） =====
     var retryCount = 0;
 
     while (retryCount < MAX_RETRY) {
-      // 检索相关记忆
       var relatedMemory = retrieveMemory(targetDocId, userInput);
-      yield "[event:memory] 相关记忆: " + relatedMemory + "\n";
 
       // ============================================================
       // 阶段1: Analyze — LLM 流式分析需求
       // ============================================================
-      yield "[event:analyze_start] 开始分析用户需求...\n";
+      yield "[phase:analyze]\n";
 
       var analysisMessages = [
         new SystemMessage(ANALYZE_PROMPT),
@@ -256,26 +246,22 @@ class GlobalAgent {
         ),
       ];
 
-      var analysisContent = "";
+      // 收集完整 LLM 输出
+      var analysisFullOutput = "";
       var analysisStream = await this.llm.stream(analysisMessages);
       for await (var chunk of analysisStream) {
         var token = chunk.content.toString();
-        analysisContent += token;
-        yield token; // 逐 token 流式输出
+        analysisFullOutput += token;
       }
-      yield "\n";
-
-      // ============================================================
-      // 【关键】净化 analysisContent：提取纯 JSON，去掉 LLM 的思考过程
-      // LLM 经常输出 "思考过程...\n分析结果：\n```json\n{...}\n```"
-      // 但 Plan 阶段只需要 JSON 部分
-      // ============================================================
-      var cleanAnalysis = this.extractJson(analysisContent);
+      // 提取 JSON 和 thought
+      var cleanAnalysis = this.extractJson(analysisFullOutput);
+      yield this.buildPhaseContent("analyze", analysisFullOutput, cleanAnalysis);
+      yield "[phase:analyze:end]\n";
 
       // ============================================================
       // 阶段2: Plan — LLM 流式制定任务清单
       // ============================================================
-      yield "\n[event:plan_start] 开始制定任务计划...\n";
+      yield "[phase:plan]\n";
 
       var planMessages = [
         new SystemMessage(PLAN_PROMPT),
@@ -284,28 +270,20 @@ class GlobalAgent {
         ),
       ];
 
-      var planContent = "";
+      var planFullOutput = "";
       var planStream = await this.llm.stream(planMessages);
       for await (var chunk of planStream) {
         var token = chunk.content.toString();
-        planContent += token;
-        yield token; // 逐 token 流式输出
+        planFullOutput += token;
       }
-      yield "\n";
-
-      // ============================================================
-      // 【关键】净化 planContent：提取纯 JSON，去掉 LLM 的思考过程
-      // ExecuteTool 需要解析 tasks JSON，不能有 markdown 包裹
-      // ============================================================
-      var cleanPlan = this.extractJson(planContent);
+      var cleanPlan = this.extractJson(planFullOutput);
+      yield this.buildPhaseContent("plan", planFullOutput, cleanPlan);
+      yield "[phase:plan:end]\n";
 
       // ============================================================
       // 阶段3: Execute — LLM 驱动执行（调用 SDK Tools）
       // ============================================================
-      // 注意：Execute 阶段不走 LLM 流式，而是通过 tool calling 循环
-      // 内部调用 editor 封装的 SDK 函数。输出为完整的执行日志。
-      // ============================================================
-      yield "\n[event:execute_start] 开始执行操作...\n";
+      yield "[phase:execute]\n";
 
       var executeTool = new ExecuteTool(this.llm);
       var executeResultStr = await executeTool._call({
@@ -313,35 +291,43 @@ class GlobalAgent {
         docId: targetDocId,
       });
 
-      // 解析执行结果
+      // 解析执行结果，发出结构化 tool 事件
       var executionLog = executeResultStr;
       try {
         var parsedExec = JSON.parse(executeResultStr);
         executionLog = parsedExec.execution_log || executeResultStr;
-      } catch { /* 保持原始字符串 */ }
+        // 发出每个工具调用事件
+        if (parsedExec.tool_calls && Array.isArray(parsedExec.tool_calls)) {
+          for (var tc of parsedExec.tool_calls) {
+            yield "[tool]" + tc.tool + "|" + (tc.args || "{}") + "\n";
+            yield "[tool_result]" + (tc.status === "success" ? "✓ " : "✗ ") + (tc.result || "") + "\n";
+          }
+        }
+      } catch { /* keep raw */ }
 
-      yield "[event:execute_log]\n" + executionLog + "\n";
+      yield "[phase:execute:end]\n";
 
       // ============================================================
       // 阶段4: Validate — LLM 流式验证结果
       // ============================================================
-      yield "\n[event:validate_start] 开始验证执行结果...\n";
+      yield "[phase:validate]\n";
 
       var validateMessages = [
         new SystemMessage(VALIDATE_PROMPT),
         new HumanMessage(
-          `## 执行日志\n${executionLog}\n\n## 原始任务\n${planContent}`
+          `## 执行日志\n${executionLog}\n\n## 原始任务\n${planFullOutput}`
         ),
       ];
 
-      var validateContent = "";
+      var validateFullOutput = "";
       var validateStream = await this.llm.stream(validateMessages);
       for await (var chunk of validateStream) {
         var token = chunk.content.toString();
-        validateContent += token;
-        yield token;
+        validateFullOutput += token;
       }
-      yield "\n";
+      var cleanValidate = this.extractJson(validateFullOutput);
+      yield this.buildPhaseContent("validate", validateFullOutput, cleanValidate);
+      yield "[phase:validate:end]\n";
 
       // ============================================================
       // 解析验证结果
@@ -349,60 +335,156 @@ class GlobalAgent {
       var success = false;
       var retryable = true;
       var needsUserInput = false;
+      var validateSummary = "";
+      var failedTasks: string[] = [];
 
       try {
-        // 从验证输出中提取 JSON（使用 extractJson 处理 markdown 包裹）
-        var cleanValidate = this.extractJson(validateContent);
         var parsed = JSON.parse(cleanValidate);
         success = parsed.result === "成功";
         retryable = parsed.retryable !== false;
         needsUserInput = parsed.needs_user_input === true;
-      } catch { /* 解析失败使用默认值 */ }
+        validateSummary = parsed.summary || parsed.result || "";
+        failedTasks = parsed.failed_tasks || [];
+      } catch { /* 使用默认值 */ }
 
       // 提取失败步骤
       var failedSteps = this.extractFailedSteps(executionLog);
 
       // 保存记忆
       manageMemory(
-        targetDocId,
-        userInput,
-        retryCount,
+        targetDocId, userInput, retryCount,
         success ? "成功" : "失败",
-        analysisContent,
-        planContent,
-        executionLog,
-        failedSteps
+        cleanAnalysis, cleanPlan, executionLog, failedSteps
       );
 
       // ============================================================
-      // 决策：成功？重试？结束？
+      // Summary 总结 — 发出结构化总结事件
       // ============================================================
+      var summary: any = {};
+
       if (success) {
-        yield "\n[event:success] 任务成功完成！\n";
+        summary = {
+          result: "success",
+          summary_text: "✅ 所有任务执行完成",
+          detail: validateSummary || "操作已成功执行",
+          failed_tasks: [],
+        };
+        yield "[summary]" + JSON.stringify(summary) + "\n";
         return;
       }
 
       if (needsUserInput || !retryable) {
-        yield "\n" + "=".repeat(50) + "\n";
-        yield "⚠️ 【需要用户介入】\n";
-        yield "失败原因: " + validateContent.slice(0, 200) + "\n";
-        if (failedSteps.length > 0) {
-          yield "失败步骤: " + failedSteps.join(", ") + "\n";
-        }
-        yield "=".repeat(50) + "\n";
+        summary = {
+          result: "intervention",
+          summary_text: "⚠️ 需要用户介入",
+          detail: validateSummary || "请提供更多信息或确认操作",
+          failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
+        };
+        yield "[summary]" + JSON.stringify(summary) + "\n";
         return;
       }
 
+      // 可重试
       retryCount++;
       if (retryCount < MAX_RETRY) {
-        yield "\n[event:retry] 第" + retryCount + "次重试...\n\n";
+        summary = {
+          result: "retry",
+          summary_text: "🔄 第" + retryCount + "次重试",
+          detail: validateSummary || "执行失败，正在重试",
+          failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
+        };
+        yield "[summary]" + JSON.stringify(summary) + "\n";
+      } else {
+        summary = {
+          result: "failed",
+          summary_text: "❌ 重试" + MAX_RETRY + "次仍然失败",
+          detail: validateSummary || "请检查文档是否存在或提供更多信息",
+          failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
+        };
+        yield "[summary]" + JSON.stringify(summary) + "\n";
+      }
+    }
+  }
+
+  /**
+   * 从 LLM 原始输出中拆分 thought（思考过程）和 content（用户可见摘要），
+   * 生成结构化的阶段内容事件。
+   *
+   * 【事件输出】
+   *   [thought]思考过程行1     ← 可折叠
+   *   [thought]思考过程行2
+   *   [content]用户可见摘要    ← 展示在阶段面板中
+   */
+  private buildPhaseContent(phase: string, fullOutput: string, cleanJson: string): string {
+    var result = "";
+
+    // 从完整输出中提取 thought：cleanJson 之前的所有内容
+    var jsonIndex = fullOutput.indexOf(cleanJson);
+    var thoughtText = jsonIndex >= 0
+      ? fullOutput.substring(0, jsonIndex).trim()
+      : "";
+
+    // 发出 thought 事件（每行一个）
+    if (thoughtText) {
+      var thoughtLines = thoughtText.split("\n");
+      for (var line of thoughtLines) {
+        var trimmed = line.trim();
+        if (trimmed) {
+          result += "[thought]" + trimmed + "\n";
+        }
       }
     }
 
-    // 重试耗尽
-    yield "\n" + "=".repeat(50) + "\n";
-    yield "❌ 重试" + MAX_RETRY + "次仍然失败\n";
-    yield "=".repeat(50) + "\n";
+    // 从 JSON 生成用户友好的摘要内容
+    var summary = this.generatePhaseSummary(phase, cleanJson);
+    if (summary) {
+      var contentLines = summary.split("\n");
+      for (var line of contentLines) {
+        if (line.trim()) {
+          result += "[content]" + line.trim() + "\n";
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * 从阶段结果的 JSON 生成用户友好的摘要文本
+   * 不展示原始 JSON，只展示可读的总结
+   */
+  private generatePhaseSummary(phase: string, jsonStr: string): string {
+    try {
+      var data = JSON.parse(jsonStr);
+
+      if (phase === "analyze") {
+        var ops = data.operations || [];
+        if (ops.length === 0) return "未识别到具体操作";
+        var summary = "已识别 " + ops.length + " 个操作：";
+        for (var op of ops) {
+          summary += "\n  • " + (op.goal || op.type || "");
+        }
+        return summary;
+      }
+
+      if (phase === "plan") {
+        var tasks = data.tasks || [];
+        if (tasks.length === 0) return "未生成任务计划";
+        var summary = "已制定 " + tasks.length + " 项任务：";
+        for (var t of tasks) {
+          summary += "\n  • " + (t.goal || "");
+        }
+        return summary;
+      }
+
+      if (phase === "validate") {
+        return data.summary || data.result || "验证完成";
+      }
+
+      return "";
+    } catch {
+      return "";
+    }
   }
 
   /**
