@@ -203,7 +203,7 @@ export class SDKReplaceAllTool extends StructuredTool {
  */
 export class SDKGetTextTool extends StructuredTool {
   name = "sdk_get_text";
-  description = "读取文档的纯文本全文。适用于：了解文档结构、验证操作结果、查找上下文";
+  description = "★★★【核心工具】读取文档的纯文本全文。当你需要理解文档内容、进行总结/分析/提取信息/翻译/回答问题时，必须先调用此工具获取文档内容！返回文档的全部文字。";
 
   schema = z.object({
     // 不需要额外的参数

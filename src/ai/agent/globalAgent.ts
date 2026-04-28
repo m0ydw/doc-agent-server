@@ -266,6 +266,13 @@ class GlobalAgent {
       yield "\n";
 
       // ============================================================
+      // 【关键】净化 analysisContent：提取纯 JSON，去掉 LLM 的思考过程
+      // LLM 经常输出 "思考过程...\n分析结果：\n```json\n{...}\n```"
+      // 但 Plan 阶段只需要 JSON 部分
+      // ============================================================
+      var cleanAnalysis = this.extractJson(analysisContent);
+
+      // ============================================================
       // 阶段2: Plan — LLM 流式制定任务清单
       // ============================================================
       yield "\n[event:plan_start] 开始制定任务计划...\n";
@@ -273,7 +280,7 @@ class GlobalAgent {
       var planMessages = [
         new SystemMessage(PLAN_PROMPT),
         new HumanMessage(
-          `## 分析结果\n${analysisContent}\n\n## 当前可用文档\n${docContext}`
+          `## 分析结果\n${cleanAnalysis}\n\n## 当前可用文档\n${docContext}`
         ),
       ];
 
@@ -287,6 +294,12 @@ class GlobalAgent {
       yield "\n";
 
       // ============================================================
+      // 【关键】净化 planContent：提取纯 JSON，去掉 LLM 的思考过程
+      // ExecuteTool 需要解析 tasks JSON，不能有 markdown 包裹
+      // ============================================================
+      var cleanPlan = this.extractJson(planContent);
+
+      // ============================================================
       // 阶段3: Execute — LLM 驱动执行（调用 SDK Tools）
       // ============================================================
       // 注意：Execute 阶段不走 LLM 流式，而是通过 tool calling 循环
@@ -296,7 +309,7 @@ class GlobalAgent {
 
       var executeTool = new ExecuteTool(this.llm);
       var executeResultStr = await executeTool._call({
-        plan_tasks: planContent,
+        plan_tasks: cleanPlan,
         docId: targetDocId,
       });
 
@@ -338,14 +351,12 @@ class GlobalAgent {
       var needsUserInput = false;
 
       try {
-        // 从验证输出中提取 JSON
-        var jsonMatch = validateContent.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          var parsed = JSON.parse(jsonMatch[0]);
-          success = parsed.result === "成功";
-          retryable = parsed.retryable !== false;
-          needsUserInput = parsed.needs_user_input === true;
-        }
+        // 从验证输出中提取 JSON（使用 extractJson 处理 markdown 包裹）
+        var cleanValidate = this.extractJson(validateContent);
+        var parsed = JSON.parse(cleanValidate);
+        success = parsed.result === "成功";
+        retryable = parsed.retryable !== false;
+        needsUserInput = parsed.needs_user_input === true;
       } catch { /* 解析失败使用默认值 */ }
 
       // 提取失败步骤
@@ -430,6 +441,36 @@ class GlobalAgent {
       }
     }
     return failed;
+  }
+
+  /**
+   * 从 LLM 输出文本中提取第一个完整 JSON 对象
+   *
+   * LLM 经常在 JSON 外面包裹 markdown 代码块和思考过程：
+   *   思考过程...
+   *   ```json
+   *   { "tasks": [...] }
+   *   ```
+   * 这个函数用大括号匹配提取出纯净的 JSON 字符串。
+   *
+   * @param text - LLM 原始输出（可能包含思考过程 + markdown）
+   * @returns 纯 JSON 字符串；如果没找到 JSON 则返回原文本
+   */
+  private extractJson(text: string): string {
+    var stack: string[] = [];
+    var start = -1;
+    for (var i = 0; i < text.length; i++) {
+      if (text[i] === "{") {
+        if (stack.length === 0) start = i;
+        stack.push("{");
+      } else if (text[i] === "}") {
+        stack.pop();
+        if (stack.length === 0 && start >= 0) {
+          return text.slice(start, i + 1);
+        }
+      }
+    }
+    return text;
   }
 
   /**
