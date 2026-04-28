@@ -235,7 +235,7 @@ class GlobalAgent {
       var relatedMemory = retrieveMemory(targetDocId, userInput);
 
       // ============================================================
-      // 阶段1: Analyze — LLM 流式分析需求
+      // 阶段1: Analyze — LLM 流式分析需求（实时 yield thought）
       // ============================================================
       yield "[phase:analyze]\n";
 
@@ -246,20 +246,37 @@ class GlobalAgent {
         ),
       ];
 
-      // 收集完整 LLM 输出
+      // 逐 token 流式输出 thought，实时到达前端
       var analysisFullOutput = "";
       var analysisStream = await this.llm.stream(analysisMessages);
+      var thoughtBuffer = "";
       for await (var chunk of analysisStream) {
         var token = chunk.content.toString();
         analysisFullOutput += token;
+        thoughtBuffer += token;
+        // 缓冲输出：每积累一定量或遇到自然断点时才 yield，避免碎片化
+        if (thoughtBuffer.length >= 30 || token.includes("\n")) {
+          yield "[thought]" + thoughtBuffer.replace(/\n/g, " ") + "\n";
+          thoughtBuffer = "";
+        }
       }
-      // 提取 JSON 和 thought
+      if (thoughtBuffer) {
+        yield "[thought]" + thoughtBuffer.replace(/\n/g, " ") + "\n";
+      }
+
+      // 提取 JSON 并生成 content 摘要
       var cleanAnalysis = this.extractJson(analysisFullOutput);
-      yield this.buildPhaseContent("analyze", analysisFullOutput, cleanAnalysis);
+      var analysisSummary = this.generatePhaseSummary("analyze", cleanAnalysis);
+      if (analysisSummary) {
+        var analysisLines = analysisSummary.split("\n");
+        for (var aline of analysisLines) {
+          if (aline.trim()) yield "[content]" + aline.trim() + "\n";
+        }
+      }
       yield "[phase:analyze:end]\n";
 
       // ============================================================
-      // 阶段2: Plan — LLM 流式制定任务清单
+      // 阶段2: Plan — LLM 流式制定任务清单（实时 yield thought）
       // ============================================================
       yield "[phase:plan]\n";
 
@@ -270,14 +287,32 @@ class GlobalAgent {
         ),
       ];
 
+      // 逐 token 流式输出 thought
       var planFullOutput = "";
       var planStream = await this.llm.stream(planMessages);
+      var planBuffer = "";
       for await (var chunk of planStream) {
         var token = chunk.content.toString();
         planFullOutput += token;
+        planBuffer += token;
+        if (planBuffer.length >= 30 || token.includes("\n")) {
+          yield "[thought]" + planBuffer.replace(/\n/g, " ") + "\n";
+          planBuffer = "";
+        }
       }
+      if (planBuffer) {
+        yield "[thought]" + planBuffer.replace(/\n/g, " ") + "\n";
+      }
+
+      // 提取 JSON 并生成 content 摘要
       var cleanPlan = this.extractJson(planFullOutput);
-      yield this.buildPhaseContent("plan", planFullOutput, cleanPlan);
+      var planSummary = this.generatePhaseSummary("plan", cleanPlan);
+      if (planSummary) {
+        var planLines = planSummary.split("\n");
+        for (var pline of planLines) {
+          if (pline.trim()) yield "[content]" + pline.trim() + "\n";
+        }
+      }
       yield "[phase:plan:end]\n";
 
       // ============================================================
@@ -308,7 +343,7 @@ class GlobalAgent {
       yield "[phase:execute:end]\n";
 
       // ============================================================
-      // 阶段4: Validate — LLM 流式验证结果
+      // 阶段4: Validate — LLM 流式验证结果（实时 yield thought）
       // ============================================================
       yield "[phase:validate]\n";
 
@@ -319,14 +354,32 @@ class GlobalAgent {
         ),
       ];
 
+      // 逐 token 流式输出 thought
       var validateFullOutput = "";
       var validateStream = await this.llm.stream(validateMessages);
+      var validateBuffer = "";
       for await (var chunk of validateStream) {
         var token = chunk.content.toString();
         validateFullOutput += token;
+        validateBuffer += token;
+        if (validateBuffer.length >= 30 || token.includes("\n")) {
+          yield "[thought]" + validateBuffer.replace(/\n/g, " ") + "\n";
+          validateBuffer = "";
+        }
       }
+      if (validateBuffer) {
+        yield "[thought]" + validateBuffer.replace(/\n/g, " ") + "\n";
+      }
+
+      // 提取 JSON 并生成 content 摘要
       var cleanValidate = this.extractJson(validateFullOutput);
-      yield this.buildPhaseContent("validate", validateFullOutput, cleanValidate);
+      var validateSummary = this.generatePhaseSummary("validate", cleanValidate);
+      if (validateSummary) {
+        var vlines = validateSummary.split("\n");
+        for (var vline of vlines) {
+          if (vline.trim()) yield "[content]" + vline.trim() + "\n";
+        }
+      }
       yield "[phase:validate:end]\n";
 
       // ============================================================
@@ -404,49 +457,6 @@ class GlobalAgent {
         yield "[summary]" + JSON.stringify(summary) + "\n";
       }
     }
-  }
-
-  /**
-   * 从 LLM 原始输出中拆分 thought（思考过程）和 content（用户可见摘要），
-   * 生成结构化的阶段内容事件。
-   *
-   * 【事件输出】
-   *   [thought]思考过程行1     ← 可折叠
-   *   [thought]思考过程行2
-   *   [content]用户可见摘要    ← 展示在阶段面板中
-   */
-  private buildPhaseContent(phase: string, fullOutput: string, cleanJson: string): string {
-    var result = "";
-
-    // 从完整输出中提取 thought：cleanJson 之前的所有内容
-    var jsonIndex = fullOutput.indexOf(cleanJson);
-    var thoughtText = jsonIndex >= 0
-      ? fullOutput.substring(0, jsonIndex).trim()
-      : "";
-
-    // 发出 thought 事件（每行一个）
-    if (thoughtText) {
-      var thoughtLines = thoughtText.split("\n");
-      for (var line of thoughtLines) {
-        var trimmed = line.trim();
-        if (trimmed) {
-          result += "[thought]" + trimmed + "\n";
-        }
-      }
-    }
-
-    // 从 JSON 生成用户友好的摘要内容
-    var summary = this.generatePhaseSummary(phase, cleanJson);
-    if (summary) {
-      var contentLines = summary.split("\n");
-      for (var line of contentLines) {
-        if (line.trim()) {
-          result += "[content]" + line.trim() + "\n";
-        }
-      }
-    }
-
-    return result;
   }
 
   /**
