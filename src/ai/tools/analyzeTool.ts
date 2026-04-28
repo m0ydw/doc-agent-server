@@ -1,94 +1,132 @@
 /**
- * 分析工具 - 需求分析
+ * ================================================================
+ * AnalyzeTool — 需求分析工具（LangChain StructuredTool）
+ * ================================================================
+ *
+ * 【职责】
+ * 分析用户的 Word 文档操作需求，输出结构化的意图描述。
+ * 只分析"用户想要什么"，不涉及具体操作方式和 SDK 调用。
+ *
+ * 【输出格式变化】
+ *   旧版: { actions: [{ action: "replace_text", target: "公司", details: "..." }] }
+ *         ↑ 过早规定了操作类型和参数，限制了后续阶段的灵活性
+ *
+ *   新版: {
+ *     intent: "text_replace",
+ *     operations: [{ type: "replace", target: "公司", goal: "替换为集团" }],
+ *     context_hints: ["可能指全文所有'公司'"]
+ *   }
+ *         ↑ 只表达意图和语境，具体怎么做交给 Plan + Execute
+ *
+ * 【LLM 角色】
+ *   这里的 LLM 扮演"需求分析师"——听懂用户的话，提炼出操作意图。
+ *   它不需要理解 SDK 如何工作，只需要理解自然语言需求。
+ * ================================================================
  */
 
-import { LLM, LLMResponse } from "../core/llm";
+import { StructuredTool } from "@langchain/core/tools";
+import { z } from "zod";
+import { ChatOpenAI } from "@langchain/openai";
+import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 
-export interface AnalyzeState {
-  user_input: string;
-  related_memory: string;
+/** AnalyzeTool 的输入参数 schema */
+const AnalyzeInputSchema = z.object({
+  user_input: z.string().describe("用户的原始需求描述（自然语言）"),
+  related_memory: z.string().describe("与该文档/需求相关的历史执行记录，用于参考之前的失败原因"),
+  doc_context: z.string().describe("当前可用文档列表的描述，帮助 LLM 理解用户提到的文档名"),
+});
+
+/** AnalyzeTool 的输出类型（同时也是 _call 返回的 JSON 字符串对应的结构） */
+export interface AnalyzeOutput {
+  /** 用户需求的总体意图分类 */
+  intent: "text_replace" | "format_change" | "mixed" | "other";
+  /** 识别出的所有操作意图 */
+  operations: Array<{
+    type: "replace" | "format" | "insert" | "delete" | "save";
+    target: string;     // 用户提到的目标描述，如"公司"、"标题"
+    goal: string;       // 用户想要的效果，如"替换为集团"、"加粗"
+    details: string;    // 补充说明，如"全文替换"、"只改第一处"
+  }>;
+  /** 上下文提示，帮助后续阶段理解用户意图 */
+  context_hints: string[];
+  /** 目标文档名（如果用户明确指定了文档） */
+  target_doc?: string;
 }
 
-export interface AnalyzeResult {
-  analysis: {
-    actions: Array<{
-      action: string;
-      target: string;
-      details: string;
-    }>;
-  };
-  thought: string;
-}
+const SYSTEM_PROMPT = `你是一个文档处理需求的**分析专家**。
+你的任务是根据用户的自然语言需求，提炼出结构化的操作意图。
 
-var systemPrompt = `你是一个文档处理助手，负责分析用户的Word操作需求。用户可能提出多个操作，请全部识别出来。
+【核心原则】
+- 你只负责理解"用户想要什么"，不规定"具体怎么操作"
+- 不要输出 SDK 调用指令、不要规定具体参数
+- 如果用户的需求不明确，在 context_hints 中标注出来
 
-请先输出你的思考过程，然后严格按照以下JSON格式输出分析结果（支持多个操作）：
+【输出格式】
+请严格按照以下 JSON 格式输出（不要加 \`\`\` 标记），只输出 JSON：
 
-思考：
-[你的思考过程，列出所有识别的操作]
-
-分析结果：
 {
-  "actions": [
-    {"action": "操作类型", "target": "操作目标", "details": "详细信息"},
-    ...
+  "intent": "text_replace | format_change | mixed | other",
+  "operations": [
+    {
+      "type": "replace | format | insert | delete | save",
+      "target": "操作目标描述",
+      "goal": "用户想要达成的效果",
+      "details": "补充说明"
+    }
+  ],
+  "context_hints": [
+    "对当前需求的语境说明"
   ]
 }
 
-允许的操作类型：
-- set_bold: 加粗文本，需要参数 text
-- set_color: 设置颜色，需要参数 text, color  
-- replace_text: 替换文本，需要参数 oldText, newText
-- save: 保存文档`;
+【类型说明】
+- type = "replace": 替换文本（如"把A换成B"）
+- type = "format":  修改格式（如"加粗"、"改颜色"）
+- type = "insert":  插入内容（如"在A后面加B"）
+- type = "delete":  删除内容（如"删掉A"）
+- type = "save":    保存文档
 
-export class AnalyzeTool {
-  private llm: LLM;
+【注意】
+- intent 是对所有操作的综合分类
+- operations 列表必须包含用户提到的每一个操作
+- context_hints 要体现用户可能的言外之意（如"公司"可能指"有限公司"）`;
 
-  constructor(llm: LLM) {
+export class AnalyzeTool extends StructuredTool<typeof AnalyzeInputSchema> {
+  name = "analyze_requirements";
+  description = "分析用户的Word文档操作需求，输出结构化的操作意图描述";
+
+  schema = AnalyzeInputSchema;
+
+  private llm: ChatOpenAI;
+
+  constructor(llm: ChatOpenAI) {
+    super();
     this.llm = llm;
   }
 
-  async analyze(state: AnalyzeState): Promise<AnalyzeResult> {
-    var userMessage = "请分析用户的Word操作需求：" + state.user_input + "\n\n相关历史记录：" + state.related_memory;
-    var messages = [
-      { text: systemPrompt, role: "system" as const },
-      { text: userMessage, role: "user" as const },
-    ];
-    var response = await this.llm.invoke(messages as any);
-    return this.parseResponse(response.content);
-  }
+  /**
+   * 执行需求分析
+   * @param input - 包含用户输入和历史记忆
+   * @returns JSON 字符串，可解析为 AnalyzeOutput
+   */
+  async _call(input: z.infer<typeof AnalyzeInputSchema>): Promise<string> {
+    const userMessage = [
+      `## 用户需求`,
+      input.user_input,
+      ``,
+      `## 当前可用文档`,
+      input.doc_context,
+      ``,
+      `## 相关历史执行记录`,
+      input.related_memory,
+    ].join("\n");
 
-  async *streamAnalyze(state: AnalyzeState): AsyncGenerator<string, void, unknown> {
-    var userMessage = "请分析用户的Word操作需求：" + state.user_input + "\n\n相关历史记录：" + state.related_memory;
-    var messages = [
-      { text: systemPrompt, role: "system" as const },
-      { text: userMessage, role: "user" as const },
-    ];
-    var stream = this.llm.stream(messages as any);
-    for await (var chunk of stream) {
-      yield chunk.content;
-    }
-  }
+    const response = await this.llm.invoke([
+      new SystemMessage(SYSTEM_PROMPT),
+      new HumanMessage(userMessage),
+    ]);
 
-  public parseResponse(content: string): AnalyzeResult {
-    try {
-      var thoughtMatch = content.match(/思考：([\s\S]*?)分析结果：/);
-      var thought = thoughtMatch ? thoughtMatch[1].trim() : "";
-      var resultMatch = content.match(/分析结果：([\s\S]*)/);
-      var resultStr = resultMatch ? resultMatch[1].trim() : "{}";
-      var analysis = JSON.parse(resultStr);
-      
-      // 确保 actions 字段存在
-      if (!analysis.actions) {
-        analysis.actions = [];
-      }
-      
-      return { analysis: analysis, thought: thought };
-    } catch (e) {
-      return {
-        analysis: { actions: [] },
-        thought: "分析失败",
-      };
-    }
+    const content = response.content.toString();
+    return content;
   }
 }

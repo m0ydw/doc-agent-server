@@ -1,42 +1,174 @@
 /**
- * 全局 LLM Agent（单例）
- * 服务启动时创建，常驻内存，跨请求保持记忆
- * 多文档感知：通过 FileRegistry 知道所有可用文档
- * 接收 contextDocId（前端当前激活的文档 ID），动态确定操作目标
+ * ================================================================
+ * GlobalAgent — 全局 LLM Agent（单例）
+ * ================================================================
+ *
+ * 【职责】
+ *   服务启动时创建，常驻内存，跨请求保持记忆。
+ *   多文档感知：通过 FileRegistry 知道所有可用文档。
+ *   接收前端消息 → 驱动 LangChain 工作流 → SSE 流式输出。
+ *
+ * 【架构概览 — LLM ↔ Agent ↔ SDK 完整调用链】
+ * ┌─────────────────────────────────────────────────────────────┐
+ * │                                                             │
+ * │  HTTP POST /api/ai/agent/message                            │
+ * │    │                                                        │
+ * │    ▼                                                        │
+ * │  aiRoutes.ts (路由)                                         │
+ * │    │                                                        │
+ * │    ▼                                                        │
+ * │  aiService.ts (SSE 输出封装)                                 │
+ * │    │                                                        │
+ * │    ▼                                                        │
+ * │  GlobalAgent.streamProcess()  ←── 你在这里                  │
+ * │    │                                                        │
+ * │    ├── 1. 解析用户输入 + 确定目标文档                        │
+ * │    │     调用 fileRegistry 获取文档信息                       │
+ * │    │                                                        │
+ * │    ├── 2. Analyze 阶段 (LLM 流式)                            │
+ * │    │     ChatOpenAI.stream() → 分析用户需求                  │
+ * │    │     输出: { intent, operations, context_hints }        │
+ * │    │                                                        │
+ * │    ├── 3. Plan 阶段 (LLM 流式)                               │
+ * │    │     ChatOpenAI.stream() → 制定语义化任务清单             │
+ * │    │     输出: { tasks: [{ goal, description, constraints }]}│
+ * │    │                                                        │
+ * │    ├── 4. Execute 阶段 (LLM 驱动)                            │
+ * │    │     ExecuteTool (内部 LLM + SDK Tools)                  │
+ * │    │     ┌─ sdk_find_text    → editor.findText()            │
+ * │    │     ├─ sdk_replace_text → editor.replaceFirst()        │
+ * │    │     ├─ sdk_replace_all  → editor.replaceAll()           │
+ * │    │     ├─ sdk_get_text     → editor.getText()             │
+ * │    │     └─ sdk_save         → sessionManager → doc.save()  │
+ * │    │                                                        │
+ * │    ├── 5. Validate 阶段 (LLM 流式)                           │
+ * │    │     ChatOpenAI.stream() → 验证执行结果                  │
+ * │    │     输出: { result, retryable, needs_user_input }      │
+ * │    │                                                        │
+ * │    └── 6. 重试决策 + 记忆保存                                │
+ * │          成功 → 结束 | 失败且可重试 → 回到第2步              │
+ * │                                                             │
+ * └─────────────────────────────────────────────────────────────┘
+ *
+ * 【SSE 流式策略】
+ *   - Analyze/Plan/Validate 阶段: 直接使用 ChatOpenAI.stream()
+ *     实现 token 级别的流式输出
+ *   - Execute 阶段: ExecuteTool 内部使用 LLM tool calling 循环，
+ *     外部只输出执行日志（不需要逐 token 流式）
+ *
+ * 【与旧版 GlobalAgent 的区别】
+ *   旧版: 自定义 LLM 接口 + 手写 axios + 手写工具类 + 手写编排
+ *   新版: ChatOpenAI + StructuredTool + 工作流 + 标准化记忆
+ * ================================================================
  */
 
-import { LLM } from "../core/llm";
-import { createZhipuAI } from "../core/aiWrapper/zhipuAI";
-import { AnalyzeTool } from "../tools/analyzeTool";
-import { PlanTool } from "../tools/planTool";
-import { ExecuteTool } from "../tools/executeTool";
-import { ValidateTool } from "../tools/validateTool";
-import { retrieveMemory, manageMemory, needsUserIntervention, clearMemories, getMemories } from "../core/memory";
+import { ChatOpenAI } from "@langchain/openai";
+import { SystemMessage, HumanMessage } from "@langchain/core/messages";
+import { createChatModel } from "../core/llm";
+import { AnalyzeTool, PlanTool, ExecuteTool, ValidateTool } from "../tools";
+import { retrieveMemory, manageMemory, clearMemories, getMemories } from "../core/memory";
 import { fileRegistry } from "../../services/fileRegistry";
 
+/** 最大重试次数 */
 const MAX_RETRY = 3;
 
+/** 初始化配置 */
 export interface GlobalAgentConfig {
   apiKey?: string;
   modelName?: string;
   temperature?: number;
 }
 
+/** streamProcess 参数 */
 export interface ProcessParams {
   message: string;
   contextDocId?: string;
 }
 
+// ================================================================
+// Analyze/Plan/Validate 阶段的 System Prompt
+// 这些 Tool 虽然定义了完整的 _call 方法，
+// 但在流式场景下，我们直接使用 LLM stream + 同样的 prompt
+// ================================================================
+
+const ANALYZE_PROMPT = `你是一个文档处理需求的**分析专家**。
+你的任务是根据用户的自然语言需求，提炼出结构化的操作意图。
+只分析"用户想要什么"，不涉及具体如何操作。
+
+请先输出你的思考过程，然后输出以下 JSON 格式的分析结果（不要加 \`\`\` 标记）：
+
+{
+  "intent": "text_replace | format_change | mixed | other",
+  "operations": [
+    {
+      "type": "replace | format | insert | delete | save",
+      "target": "操作目标描述",
+      "goal": "用户想要达成的效果",
+      "details": "补充说明"
+    }
+  ],
+  "context_hints": ["对当前需求的语境说明"]
+}`;
+
+const PLAN_PROMPT = `你是一个文档处理任务的**规划专家**。
+根据分析结果，制定语义化的任务清单。只规划"要做什么"，不规定"怎么做"。
+
+每个任务应该包含：
+- goal: 一句话目标
+- description: 详细描述
+- constraints: 约束条件
+- success_criteria: 成功标准
+
+请先输出你的思考过程，然后输出以下 JSON 格式的计划（不要加 \`\`\` 标记）：
+
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "goal": "任务目标",
+      "description": "详细描述",
+      "constraints": ["约束条件"],
+      "success_criteria": "成功标准",
+      "priority": "high"
+    }
+  ],
+  "dependencies": [],
+  "ordering": "sequential",
+  "fallback_strategies": [
+    { "condition": "什么情况下触发", "action": "备选方案" }
+  ]
+}`;
+
+const VALIDATE_PROMPT = `你是一个文档操作结果的**验证专家**。
+根据执行日志判断操作是否成功，以及是否可重试。
+
+输出以下 JSON 格式（不要加 \`\`\` 标记）：
+
+{
+  "result": "成功|失败|部分成功",
+  "summary": "简要总结",
+  "retryable": true/false,
+  "needs_user_input": true/false,
+  "failed_tasks": ["失败任务"],
+  "error_analysis": "失败原因"
+}`;
+
+/**
+ * 全局 Agent 类
+ * 单例，管理 LangChain 工作流的生命周期
+ */
 class GlobalAgent {
-  private llm: LLM | null = null;
-  private analyzeTool: AnalyzeTool | null = null;
-  private planTool: PlanTool | null = null;
-  private executeTool: ExecuteTool | null = null;
-  private validateTool: ValidateTool | null = null;
+  private llm: ChatOpenAI | null = null;
   private initialized = false;
 
+  /** 检测 llm 是否可用的 getter */
+  get isInitialized(): boolean {
+    return this.initialized && this.llm !== null;
+  }
+
   /**
-   * 初始化 Agent（创建 LLM 和 Tools）
+   * 初始化 Agent
+   * 创建 ChatOpenAI 实例（通过 baseURL 切换厂商）
    */
   initialize(config?: GlobalAgentConfig): void {
     if (this.initialized) {
@@ -46,34 +178,35 @@ class GlobalAgent {
 
     var apiKey = config?.apiKey || process.env.ZHIPUAI_API_KEY;
     if (!apiKey) {
-      console.warn("[GlobalAgent] 未配置 ZHIPUAI_API_KEY，Agent 无法工作");
+      console.warn("[GlobalAgent] 未配置 API Key，Agent 无法工作");
       return;
     }
 
-    this.llm = createZhipuAI({
+    this.llm = createChatModel({
+      provider: "zhipu",
       apiKey: apiKey,
       modelName: config?.modelName || "glm-4-flash",
       temperature: config?.temperature ?? 0.1,
     });
 
-    this.analyzeTool = new AnalyzeTool(this.llm);
-    this.planTool = new PlanTool(this.llm);
-    this.executeTool = new ExecuteTool();
-    this.validateTool = new ValidateTool(this.llm);
-
     this.initialized = true;
-    console.log("[GlobalAgent] 初始化完成");
+    console.log("[GlobalAgent] 初始化完成 (ChatOpenAI + LangChain)");
   }
 
   /**
-   * 检查是否已初始化
-   */
-  get isInitialized(): boolean {
-    return this.initialized;
-  }
-
-  /**
+   * =============================================================
    * 处理用户消息，SSE 流式返回
+   * =============================================================
+   *
+   * 【流式输出策略】
+   *   Analyze / Plan / Validate 阶段 → 使用 llm.stream() 逐 token 输出
+   *   Execute 阶段 → 使用 ExecuteTool（内部 LLM + SDK Tools），输出执行日志
+   *
+   * 【SSE 事件格式】
+   *   普通文本: "[分析阶段] 开始分析...\n"
+   *   LLM 输出: 直接 yield LLM token
+   *   事件标记: "[event:analyze_start]" (为未来的组件化渲染预留)
+   * =============================================================
    */
   async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
     if (!this.initialized || !this.llm) {
@@ -86,7 +219,7 @@ class GlobalAgent {
 
     // 获取文档上下文
     var docContext = fileRegistry.toContextString(contextDocId);
-    yield "[文档列表] " + docContext.replace(/\n/g, "\n[文档列表] ") + "\n";
+    yield "[event:doc_list] " + docContext.replace(/\n/g, "\n") + "\n";
 
     // 自动确定目标文档
     var targetDocId = this.resolveTargetDocId(userInput, contextDocId);
@@ -103,154 +236,167 @@ class GlobalAgent {
     var targetName = targetEntry ? targetEntry.originalName : targetDocId;
     yield "[目标文档] " + targetName + " (" + targetDocId + ")\n\n";
 
-    // ===== Agent 主循环 =====
-    var state: any = {
-      user_input: userInput,
-      docId: targetDocId,
-      doc_path: targetDocId, // memory 模块使用 doc_path 作为 key，这里传入 docId
-      retry_count: 0,
-      related_memory: "",
-      analysis: {},
-      analysis_thought: "",
-      plan: {},
-      plan_thought: "",
-      execution_log: "",
-      execution_thought: "",
-      result: "",
-      validate_thought: "",
-      retryable: true,
-      needsUserInput: false,
-      failedSteps: [],
-    };
+    // ===== Agent 主循环（支持重试） =====
+    var retryCount = 0;
 
-    while (state.retry_count < MAX_RETRY) {
+    while (retryCount < MAX_RETRY) {
       // 检索相关记忆
-      state.related_memory = retrieveMemory(state.doc_path, state.user_input);
-      yield "[记忆检索] 相关历史记录: " + state.related_memory + "\n";
+      var relatedMemory = retrieveMemory(targetDocId, userInput);
+      yield "[event:memory] 相关记忆: " + relatedMemory + "\n";
 
-      // ===== 分析阶段 =====
-      var analyzeState = {
-        user_input: state.user_input,
-        related_memory: state.related_memory,
-      };
-      yield "[分析阶段] 开始分析用户需求...\n";
+      // ============================================================
+      // 阶段1: Analyze — LLM 流式分析需求
+      // ============================================================
+      yield "[event:analyze_start] 开始分析用户需求...\n";
 
-      var analyzeContent = "";
-      for await (var chunk of this.analyzeTool!.streamAnalyze(analyzeState)) {
-        analyzeContent += chunk;
-        yield chunk;
+      var analysisMessages = [
+        new SystemMessage(ANALYZE_PROMPT),
+        new HumanMessage(
+          `## 用户需求\n${userInput}\n\n## 当前可用文档\n${docContext}\n\n## 相关历史\n${relatedMemory}`
+        ),
+      ];
+
+      var analysisContent = "";
+      var analysisStream = await this.llm.stream(analysisMessages);
+      for await (var chunk of analysisStream) {
+        var token = chunk.content.toString();
+        analysisContent += token;
+        yield token; // 逐 token 流式输出
       }
-      state.analysis = this.analyzeTool!.parseResponse(analyzeContent)?.analysis || { actions: [] };
-      yield "\n[分析结果解析] " + JSON.stringify(state.analysis) + "\n";
-
-      // 从分析结果中重新确认目标文档
-      var resolvedDocId = this.resolveTargetDocIdFromAnalysis(userInput, contextDocId, state.analysis);
-      if (resolvedDocId && resolvedDocId !== targetDocId) {
-        targetDocId = resolvedDocId;
-        state.docId = targetDocId;
-        state.doc_path = targetDocId;
-        var newEntry = fileRegistry.get(targetDocId);
-        yield "[切换目标] 切换到文档: " + (newEntry ? newEntry.originalName : targetDocId) + "\n";
-      }
-
-      // ===== 规划阶段 =====
-      var planState = {
-        analysis: state.analysis,
-        related_memory: state.related_memory,
-      };
-      yield "[规划阶段] 开始生成执行计划...\n";
-
-      var planContent = "";
-      for await (var chunk of this.planTool!.streamPlan(planState)) {
-        planContent += chunk;
-        yield chunk;
-      }
-      state.plan = this.planTool!.parseResponse(planContent)?.plan || { steps: [] };
-      yield "\n[计划结果解析] " + JSON.stringify(state.plan) + "\n";
-
-      // ===== 执行阶段 =====
-      var executeState: any = {
-        plan: state.plan,
-        execution_log: "",
-        targetDocId: targetDocId,
-      };
-      yield "[执行阶段] 开始执行计划...\n";
-      for await (var chunk of this.executeTool!.streamExecute(executeState)) {
-        yield chunk;
-      }
-      state.execution_log = executeState.execution_log || "";
       yield "\n";
 
-      // ===== 验证阶段 =====
-      var validateState = {
-        execution_log: state.execution_log,
-      };
-      yield "[验证阶段] 开始验证执行结果...\n";
+      // ============================================================
+      // 阶段2: Plan — LLM 流式制定任务清单
+      // ============================================================
+      yield "\n[event:plan_start] 开始制定任务计划...\n";
+
+      var planMessages = [
+        new SystemMessage(PLAN_PROMPT),
+        new HumanMessage(
+          `## 分析结果\n${analysisContent}\n\n## 当前可用文档\n${docContext}`
+        ),
+      ];
+
+      var planContent = "";
+      var planStream = await this.llm.stream(planMessages);
+      for await (var chunk of planStream) {
+        var token = chunk.content.toString();
+        planContent += token;
+        yield token; // 逐 token 流式输出
+      }
+      yield "\n";
+
+      // ============================================================
+      // 阶段3: Execute — LLM 驱动执行（调用 SDK Tools）
+      // ============================================================
+      // 注意：Execute 阶段不走 LLM 流式，而是通过 tool calling 循环
+      // 内部调用 editor 封装的 SDK 函数。输出为完整的执行日志。
+      // ============================================================
+      yield "\n[event:execute_start] 开始执行操作...\n";
+
+      var executeTool = new ExecuteTool(this.llm);
+      var executeResultStr = await executeTool._call({
+        plan_tasks: planContent,
+        docId: targetDocId,
+      });
+
+      // 解析执行结果
+      var executionLog = executeResultStr;
+      try {
+        var parsedExec = JSON.parse(executeResultStr);
+        executionLog = parsedExec.execution_log || executeResultStr;
+      } catch { /* 保持原始字符串 */ }
+
+      yield "[event:execute_log]\n" + executionLog + "\n";
+
+      // ============================================================
+      // 阶段4: Validate — LLM 流式验证结果
+      // ============================================================
+      yield "\n[event:validate_start] 开始验证执行结果...\n";
+
+      var validateMessages = [
+        new SystemMessage(VALIDATE_PROMPT),
+        new HumanMessage(
+          `## 执行日志\n${executionLog}\n\n## 原始任务\n${planContent}`
+        ),
+      ];
 
       var validateContent = "";
-      for await (var chunk of this.validateTool!.streamValidate(validateState)) {
-        validateContent += chunk;
-        yield chunk;
+      var validateStream = await this.llm.stream(validateMessages);
+      for await (var chunk of validateStream) {
+        var token = chunk.content.toString();
+        validateContent += token;
+        yield token;
       }
-      var validateResult = this.validateTool!.parseResponse(validateContent);
-      state.result = validateResult.result;
-      state.retryable = validateResult.retryable;
-      state.needsUserInput = validateResult.needsUserInput;
-      yield "\n[验证结果] result=" + state.result + ", retryable=" + state.retryable + ", needsUserInput=" + state.needsUserInput + "\n";
+      yield "\n";
+
+      // ============================================================
+      // 解析验证结果
+      // ============================================================
+      var success = false;
+      var retryable = true;
+      var needsUserInput = false;
+
+      try {
+        // 从验证输出中提取 JSON
+        var jsonMatch = validateContent.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          var parsed = JSON.parse(jsonMatch[0]);
+          success = parsed.result === "成功";
+          retryable = parsed.retryable !== false;
+          needsUserInput = parsed.needs_user_input === true;
+        }
+      } catch { /* 解析失败使用默认值 */ }
 
       // 提取失败步骤
-      state.failedSteps = this.extractFailedSteps(state.execution_log);
+      var failedSteps = this.extractFailedSteps(executionLog);
 
       // 保存记忆
       manageMemory(
-        state.doc_path,
-        state.user_input,
-        state.retry_count,
-        state.result,
-        state.analysis,
-        state.plan,
-        state.execution_log,
-        state.failedSteps
+        targetDocId,
+        userInput,
+        retryCount,
+        success ? "成功" : "失败",
+        analysisContent,
+        planContent,
+        executionLog,
+        failedSteps
       );
 
-      // 检查是否成功
-      if (state.result.indexOf("成功") >= 0) {
-        yield "[最终结果] 任务成功完成！\n";
+      // ============================================================
+      // 决策：成功？重试？结束？
+      // ============================================================
+      if (success) {
+        yield "\n[event:success] 任务成功完成！\n";
         return;
       }
 
-      // 检查是否需要用户介入
-      if (!state.retryable || state.needsUserInput) {
+      if (needsUserInput || !retryable) {
         yield "\n" + "=".repeat(50) + "\n";
         yield "⚠️ 【需要用户介入】\n";
-        yield "问题无法通过自动重试解决。\n";
-        yield "失败原因: " + state.result + "\n";
-        if (state.failedSteps.length > 0) {
-          yield "失败步骤: " + state.failedSteps.join(", ") + "\n";
+        yield "失败原因: " + validateContent.slice(0, 200) + "\n";
+        if (failedSteps.length > 0) {
+          yield "失败步骤: " + failedSteps.join(", ") + "\n";
         }
-        yield "请提供更多信息或确认操作。\n";
         yield "=".repeat(50) + "\n";
         return;
       }
 
-      state.retry_count++;
-      yield "[重试] 任务失败，开始第" + state.retry_count + "次重试...\n";
+      retryCount++;
+      if (retryCount < MAX_RETRY) {
+        yield "\n[event:retry] 第" + retryCount + "次重试...\n\n";
+      }
     }
 
     // 重试耗尽
-    if (state.retry_count >= MAX_RETRY) {
-      yield "\n" + "=".repeat(50) + "\n";
-      yield "❌ 重试" + MAX_RETRY + "次仍然失败\n";
-      yield "最终结果: " + state.result + "\n";
-      if (state.failedSteps.length > 0) {
-        yield "失败步骤: " + state.failedSteps.join(", ") + "\n";
-      }
-      yield "=".repeat(50) + "\n";
-    }
+    yield "\n" + "=".repeat(50) + "\n";
+    yield "❌ 重试" + MAX_RETRY + "次仍然失败\n";
+    yield "=".repeat(50) + "\n";
   }
 
   /**
    * 确定目标文档 ID
+   * 逻辑与旧版一致：按文档名匹配 → contextDocId → 默认第一个
    */
   private resolveTargetDocId(userInput: string, contextDocId?: string): string | undefined {
     var allDocs = fileRegistry.getAll();
@@ -259,41 +405,16 @@ class GlobalAgent {
 
     // 1. 用户消息中明确提到文档名
     for (var doc of allDocs) {
-      if (userInput.indexOf(doc.originalName) >= 0) {
-        return doc.docId;
-      }
-      // 短名匹配（去掉扩展名）
+      if (userInput.indexOf(doc.originalName) >= 0) return doc.docId;
       var shortName = doc.originalName.replace(/\.\w+$/, "");
-      if (userInput.indexOf(shortName) >= 0) {
-        return doc.docId;
-      }
+      if (userInput.indexOf(shortName) >= 0) return doc.docId;
     }
 
-    // 2. 使用 contextDocId（前端当前激活的文档）
-    if (contextDocId && fileRegistry.get(contextDocId)) {
-      return contextDocId;
-    }
+    // 2. 使用 contextDocId
+    if (contextDocId && fileRegistry.get(contextDocId)) return contextDocId;
 
-    // 3. 默认第一个文档
+    // 3. 默认第一个
     return allDocs[0].docId;
-  }
-
-  /**
-   * 从 LLM 分析结果中重新确认目标文档
-   */
-  private resolveTargetDocIdFromAnalysis(userInput: string, contextDocId?: string, analysis?: any): string | undefined {
-    // 先看 analysis 中是否有 target 信息提到文档名
-    if (analysis?.actions) {
-      for (var action of analysis.actions) {
-        if (action.target) {
-          var targetStr = String(action.target);
-          var found = fileRegistry.getByName(targetStr);
-          if (found) return found.docId;
-        }
-      }
-    }
-    // 回退到基础解析
-    return this.resolveTargetDocId(userInput, contextDocId);
   }
 
   /**
@@ -303,11 +424,9 @@ class GlobalAgent {
     var failed: string[] = [];
     var lines = executionLog.split("\n");
     for (var line of lines) {
-      if (line.indexOf("[执行]") >= 0 && line.indexOf("失败") >= 0) {
-        var actionMatch = line.match(/\[执行\]\s*(.+?)\s*[-–—]\s*失败/);
-        if (actionMatch) {
-          failed.push(actionMatch[1].trim());
-        }
+      if (line.indexOf("[工具]") >= 0 && line.indexOf("失败") >= 0) {
+        var match = line.match(/\[工具\]\s*(\w+)/);
+        if (match) failed.push(match[1]);
       }
     }
     return failed;
@@ -339,6 +458,7 @@ var globalAgent: GlobalAgent | null = null;
 
 /**
  * 初始化全局 Agent
+ * 在 server.ts 启动时调用
  */
 export async function initGlobalAgent(config?: GlobalAgentConfig): Promise<void> {
   if (globalAgent) {
