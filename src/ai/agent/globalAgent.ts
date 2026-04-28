@@ -68,6 +68,7 @@ import { createChatModel } from "../core/llm";
 import { AnalyzeTool, PlanTool, ExecuteTool, ValidateTool } from "../tools";
 import { retrieveMemory, manageMemory, clearMemories, getMemories } from "../core/memory";
 import { fileRegistry } from "../../services/fileRegistry";
+import editor from "../../services/editor";
 
 /** 最大重试次数 */
 const MAX_RETRY = 3;
@@ -83,6 +84,7 @@ export interface GlobalAgentConfig {
 export interface ProcessParams {
   message: string;
   contextDocId?: string;
+  mode?: "workflow" | "chat";
 }
 
 // ================================================================
@@ -195,6 +197,143 @@ class GlobalAgent {
 
   /**
    * =============================================================
+   * 流式调用 LLM，实时 yield thought（过滤 JSON，降低缓冲阈值）
+   * =============================================================
+   *
+   * 特性：
+   *   1. 逐字符状态机：检测到 JSON 起始 `{` 时停止 thought 输出
+   *   2. 低缓冲阈值（~8 字符），提高实时性
+   *   3. 返回完整输出文本，供后续 extractJson 处理
+   */
+  private async *streamLLMWithThoughtFilter(
+    messages: (SystemMessage | HumanMessage)[]
+  ): AsyncGenerator<string, string, unknown> {
+    if (!this.llm) throw new Error("LLM 未初始化");
+
+    var fullOutput = "";
+    var stream = await this.llm.stream(messages);
+    var thoughtBuffer = "";
+    var jsonDepth = 0;
+    var inJson = false;
+
+    for await (var chunk of stream) {
+      var token = chunk.content.toString();
+      fullOutput += token;
+
+      for (var i = 0; i < token.length; i++) {
+        var char = token[i];
+
+        if (char === '{' && !inJson) {
+          // 进入 JSON，先 flush thought buffer
+          if (thoughtBuffer.trim()) {
+            yield "[thought]" + thoughtBuffer.trim().replace(/\n/g, " ") + "\n";
+            thoughtBuffer = "";
+          }
+          inJson = true;
+          jsonDepth = 1;
+        } else if (char === '{' && inJson) {
+          jsonDepth++;
+        } else if (char === '}' && inJson) {
+          jsonDepth--;
+          if (jsonDepth === 0) {
+            inJson = false;
+          }
+        } else if (!inJson) {
+          thoughtBuffer += char;
+          // 小缓冲输出：每 ~8 字符或遇到自然断点
+          if (thoughtBuffer.length >= 8 || char === '\n' || char === '。' || char === '，') {
+            var line = thoughtBuffer.replace(/\n/g, " ").trim();
+            if (line) {
+              yield "[thought]" + line + "\n";
+            }
+            thoughtBuffer = "";
+          }
+        }
+        // inJson === true 时：处于 JSON 内部，不输出任何内容
+      }
+    }
+
+    // flush 剩余 thought
+    if (thoughtBuffer.trim()) {
+      yield "[thought]" + thoughtBuffer.trim().replace(/\n/g, " ") + "\n";
+    }
+
+    return fullOutput;
+  }
+
+  /**
+   * =============================================================
+   * Chat 模式 — 直接对话回答（无阶段流水线）
+   * =============================================================
+   *
+   * 流程：
+   *   1. 读取文档文本（通过 SDK）
+   *   2. 构建对话 prompt（文档内容 + 用户问题）
+   *   3. LLM 流式输出 chat 事件
+   */
+  private async *runChatMode(
+    docId: string,
+    docName: string,
+    userInput: string,
+    _docContext: string
+  ): AsyncGenerator<string, void, unknown> {
+    // 1. 读取文档文本
+    yield "[tool_start]sdk_get_text|获取文档内容\n";
+    var docText = "";
+    try {
+      docText = await editor.getText(docId);
+      yield "[tool]sdk_get_text|获取文档内容\n";
+      yield "[tool_result]✓ 文档全文（" + docText.length + " 字符）\n";
+    } catch (e: any) {
+      yield "[tool]sdk_get_text|获取文档内容\n";
+      yield "[tool_result]✗ 读取失败：" + (e.message || "未知错误") + "\n";
+      yield "[error]无法读取文档内容，请检查文档是否正常打开\n";
+      return;
+    }
+
+    // 2. 构建对话 prompt
+    var chatMessages = [
+      new SystemMessage(
+        `你是一个文档处理助手。用户正在查看文档"${docName}"。\n` +
+        `请根据文档内容和用户问题，提供有帮助的回答。\n` +
+        `- 使用 Markdown 格式化回答\n` +
+        `- 如果文档内容较多，只提取与问题相关的部分\n` +
+        `- 保持回答简洁清晰\n` +
+        `- 不要输出 JSON 格式数据`
+      ),
+      new HumanMessage(
+        `## 用户问题\n${userInput}\n\n` +
+        `## 文档内容\n${docText.substring(0, 4000)}` +
+        (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : "")
+      ),
+    ];
+
+    // 3. 流式输出对话内容（使用 [chat] 事件）
+    var chatStream = await this.llm!.stream(chatMessages);
+    var chatBuffer = "";
+    for await (var chunk of chatStream) {
+      var token = chunk.content.toString();
+      chatBuffer += token;
+      if (chatBuffer.length >= 10 || token.includes("\n")) {
+        yield "[chat]" + chatBuffer.replace(/\n/g, " ").trim() + "\n";
+        chatBuffer = "";
+      }
+    }
+    if (chatBuffer.trim()) {
+      yield "[chat]" + chatBuffer.replace(/\n/g, " ").trim() + "\n";
+    }
+
+    // 4. 结束
+    yield "[summary]" + JSON.stringify({
+      result: "success",
+      summary_text: "",
+      detail: "",
+      failed_tasks: [],
+    }) + "\n";
+  }
+
+  /**
+   * =============================================================
    * 处理用户消息，SSE 流式返回
    * =============================================================
    *
@@ -217,6 +356,7 @@ class GlobalAgent {
     var userInput = params.message;
     var contextDocId = params.contextDocId;
     var docContext = fileRegistry.toContextString(contextDocId);
+    var mode = params.mode || "workflow";
 
     // 确定目标文档
     var targetDocId = this.resolveTargetDocId(userInput, contextDocId);
@@ -228,15 +368,22 @@ class GlobalAgent {
     var targetName = (fileRegistry.get(targetDocId)?.originalName) || targetDocId;
     yield "[phase:start]doc_target|" + targetName + "\n";
 
+    // ============ Chat 模式：直接对话回答 ============
+    if (mode === "chat") {
+      yield* this.runChatMode(targetDocId, targetName, userInput, docContext);
+      return;
+    }
+
+    // ============ Workflow 模式：4 阶段流水线 ==========
     // ===== Agent 主循环（支持重试） =====
     var retryCount = 0;
+    var cachedDocText = "";  // 文本缓存，避免重复 SDK 读取
 
     while (retryCount < MAX_RETRY) {
       var relatedMemory = retrieveMemory(targetDocId, userInput);
 
       // ============================================================
-      // 阶段1: Analyze — LLM 流式分析需求（实时 yield thought）
-      // ============================================================
+      // 阶段1: Analyze — LLM 流式分析需求（过滤 JSON，实时 yield thought）
       yield "[phase:analyze]\n";
 
       var analysisMessages = [
@@ -246,23 +393,12 @@ class GlobalAgent {
         ),
       ];
 
-      // 逐 token 流式输出 thought，实时到达前端
-      var analysisFullOutput = "";
-      var analysisStream = await this.llm.stream(analysisMessages);
-      var thoughtBuffer = "";
-      for await (var chunk of analysisStream) {
-        var token = chunk.content.toString();
-        analysisFullOutput += token;
-        thoughtBuffer += token;
-        // 缓冲输出：每积累一定量或遇到自然断点时才 yield，避免碎片化
-        if (thoughtBuffer.length >= 30 || token.includes("\n")) {
-          yield "[thought]" + thoughtBuffer.replace(/\n/g, " ") + "\n";
-          thoughtBuffer = "";
-        }
+      // 使用过滤方法：自动过滤 JSON，逐字符实时输出 thought
+      var analysisGen = this.streamLLMWithThoughtFilter(analysisMessages);
+      for await (var analysisYield of analysisGen) {
+        yield analysisYield;
       }
-      if (thoughtBuffer) {
-        yield "[thought]" + thoughtBuffer.replace(/\n/g, " ") + "\n";
-      }
+      var analysisFullOutput = (await analysisGen.next()).value || "";
 
       // 提取 JSON 并生成 content 摘要
       var cleanAnalysis = this.extractJson(analysisFullOutput);
@@ -276,35 +412,23 @@ class GlobalAgent {
       yield "[phase:analyze:end]\n";
 
       // ============================================================
-      // 阶段2: Plan — LLM 流式制定任务清单（实时 yield thought）
-      // ============================================================
+      // 阶段2: Plan — LLM 流式制定任务清单（过滤 JSON，实时 yield thought）
       yield "[phase:plan]\n";
 
       var planMessages = [
         new SystemMessage(PLAN_PROMPT),
         new HumanMessage(
-          `## 分析结果\n${cleanAnalysis}\n\n## 当前可用文档\n${docContext}`
+          `## 分析结果\n${cleanAnalysis}\n\n## 当前可用文档\n${docContext}` +
+          (cachedDocText ? `\n\n## 已有文档内容片段\n${cachedDocText.substring(0, 2000)}` : "")
         ),
       ];
 
-      // 逐 token 流式输出 thought
-      var planFullOutput = "";
-      var planStream = await this.llm.stream(planMessages);
-      var planBuffer = "";
-      for await (var chunk of planStream) {
-        var token = chunk.content.toString();
-        planFullOutput += token;
-        planBuffer += token;
-        if (planBuffer.length >= 30 || token.includes("\n")) {
-          yield "[thought]" + planBuffer.replace(/\n/g, " ") + "\n";
-          planBuffer = "";
-        }
+      var planGen = this.streamLLMWithThoughtFilter(planMessages);
+      for await (var planYield of planGen) {
+        yield planYield;
       }
-      if (planBuffer) {
-        yield "[thought]" + planBuffer.replace(/\n/g, " ") + "\n";
-      }
+      var planFullOutput = (await planGen.next()).value || "";
 
-      // 提取 JSON 并生成 content 摘要
       var cleanPlan = this.extractJson(planFullOutput);
       var planSummary = this.generatePhaseSummary("plan", cleanPlan);
       if (planSummary) {
@@ -334,8 +458,14 @@ class GlobalAgent {
         // 发出每个工具调用事件
         if (parsedExec.tool_calls && Array.isArray(parsedExec.tool_calls)) {
           for (var tc of parsedExec.tool_calls) {
+            yield "[tool_start]" + tc.tool + "|" + (tc.args || "{}") + "\n";
             yield "[tool]" + tc.tool + "|" + (tc.args || "{}") + "\n";
             yield "[tool_result]" + (tc.status === "success" ? "✓ " : "✗ ") + (tc.result || "") + "\n";
+            // 缓存文档文本，避免重试时重复调用 sdk_get_text
+            if (tc.tool === "sdk_get_text" && tc.status === "success" && tc.result) {
+              var textMatch = tc.result.match(/：(.+)/);
+              cachedDocText = textMatch ? textMatch[1] : tc.result;
+            }
           }
         }
       } catch { /* keep raw */ }
@@ -343,8 +473,65 @@ class GlobalAgent {
       yield "[phase:execute:end]\n";
 
       // ============================================================
-      // 阶段4: Validate — LLM 流式验证结果（实时 yield thought）
+      // 阶段4: Generate — 基于执行结果生成用户可见的回答
       // ============================================================
+      yield "[phase:generate]\n";
+
+      // 从工具调用结果中提取文档文本片段
+      var docSnippet = "";
+      try {
+        var parsedExecForGen = JSON.parse(executeResultStr);
+        if (parsedExecForGen.tool_calls && Array.isArray(parsedExecForGen.tool_calls)) {
+          for (var tc2 of parsedExecForGen.tool_calls) {
+            if (tc2.tool === "sdk_get_text" && tc2.result) {
+              // 提取 sdk_get_text 的结果文本（格式："文档全文（N 字符）：..."）
+              var textMatch = tc2.result.match(/：(.+)/);
+              docSnippet = textMatch ? textMatch[1] : tc2.result;
+              // 截取前 4000 字符避免 context 溢出
+              if (docSnippet.length > 4000) {
+                docSnippet = docSnippet.substring(0, 4000) + "...(已截断)";
+              }
+              break;
+            }
+          }
+        }
+      } catch { /* 忽略提取失败 */ }
+
+      // 构建生成 prompt
+      var generateMessages = [
+        new SystemMessage(
+          `你是一个文档处理助手。根据用户需求和文档内容，生成简洁、有帮助的回答。\n` +
+          `- 如果用户请求总结或查看内容，直接输出内容的概述和关键点\n` +
+          `- 如果用户请求修改文档，简要说明已完成的操作\n` +
+          `- 不要输出 JSON 格式数据\n` +
+          `- 使用 Markdown 格式化回答（列表、加粗等）`
+        ),
+        new HumanMessage(
+          `## 用户需求\n${userInput}\n\n` +
+          `## 执行结果摘要\n${executionLog.split("\n").slice(0, 10).join("\n")}\n\n` +
+          `## 文档内容片段\n${docSnippet || "（无文档内容）"}`
+        ),
+      ];
+
+      // 流式输出生成内容（逐 token，不显示为 thought）
+      var generateStream = await this.llm.stream(generateMessages);
+      var genBuffer = "";
+      for await (var genChunk of generateStream) {
+        var genToken = genChunk.content.toString();
+        genBuffer += genToken;
+        // 小缓冲输出，实时到达前端
+        if (genBuffer.length >= 10 || genToken.includes("\n")) {
+          yield "[content]" + genBuffer.replace(/\n/g, " ").trim() + "\n";
+          genBuffer = "";
+        }
+      }
+      if (genBuffer.trim()) {
+        yield "[content]" + genBuffer.replace(/\n/g, " ").trim() + "\n";
+      }
+      yield "[phase:generate:end]\n";
+
+      // ============================================================
+      // 阶段5: Validate — LLM 流式验证结果（过滤 JSON，实时 yield thought）
       yield "[phase:validate]\n";
 
       var validateMessages = [
@@ -354,28 +541,16 @@ class GlobalAgent {
         ),
       ];
 
-      // 逐 token 流式输出 thought
-      var validateFullOutput = "";
-      var validateStream = await this.llm.stream(validateMessages);
-      var validateBuffer = "";
-      for await (var chunk of validateStream) {
-        var token = chunk.content.toString();
-        validateFullOutput += token;
-        validateBuffer += token;
-        if (validateBuffer.length >= 30 || token.includes("\n")) {
-          yield "[thought]" + validateBuffer.replace(/\n/g, " ") + "\n";
-          validateBuffer = "";
-        }
+      var validateGen = this.streamLLMWithThoughtFilter(validateMessages);
+      for await (var validateYield of validateGen) {
+        yield validateYield;
       }
-      if (validateBuffer) {
-        yield "[thought]" + validateBuffer.replace(/\n/g, " ") + "\n";
-      }
+      var validateFullOutput = (await validateGen.next()).value || "";
 
-      // 提取 JSON 并生成 content 摘要
       var cleanValidate = this.extractJson(validateFullOutput);
-      var validateSummary = this.generatePhaseSummary("validate", cleanValidate);
-      if (validateSummary) {
-        var vlines = validateSummary.split("\n");
+      var validateSummaryText = this.generatePhaseSummary("validate", cleanValidate);
+      if (validateSummaryText) {
+        var vlines = validateSummaryText.split("\n");
         for (var vline of vlines) {
           if (vline.trim()) yield "[content]" + vline.trim() + "\n";
         }

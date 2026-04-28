@@ -23,7 +23,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     var body = req.body;
     var message = body.message;
     var contextDocId = body.contextDocId;
-    var mode: string = body.mode || "workflow";  // "workflow" | "chat"（预留）
+    var mode: "workflow" | "chat" = (body.mode === "chat" ? "chat" : "workflow");
 
     if (!message || typeof message !== "string" || message.trim().length === 0) {
       res.status(400).write("错误: message 不能为空");
@@ -52,6 +52,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     var stream = agent.streamProcess({
       message: message,
       contextDocId: contextDocId,
+      mode: mode,
     });
 
     for await (var chunk of stream) {
