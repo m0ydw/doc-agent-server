@@ -267,14 +267,20 @@ class GlobalAgent {
       doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
     });
 
-    // 3. 流式输出对话内容（\n → [br] 防 SSE 断裂）
+    // 3. 流式输出对话内容（\n → [br]，防标记切割）
     var chatStream = await this.llm!.stream(chatMessages);
     var chatBuffer = "";
     for await (var chunk of chatStream) {
       chatBuffer += chunk.content.toString().replace(/\n/g, "[br]");
-      if (chatBuffer.length >= 50) {
-        yield "[chat]" + chatBuffer + "\n";
-        chatBuffer = "";
+      if (chatBuffer.length >= 60) {
+        var cutIdx = Math.max(
+          chatBuffer.lastIndexOf("[br][br]", 64) + 8,
+          chatBuffer.lastIndexOf("[br]", 64) + 4,
+          chatBuffer.lastIndexOf(" ", 64) + 1,
+          60
+        );
+        yield "[chat]" + chatBuffer.slice(0, cutIdx) + "\n";
+        chatBuffer = chatBuffer.slice(cutIdx);
       }
     }
     if (chatBuffer) {
@@ -436,6 +442,12 @@ class GlobalAgent {
       }
       yield "[phase]计划制定完成\n";
 
+      // 发射 todo 列表
+      if (planObj && planObj.tasks && Array.isArray(planObj.tasks) && planObj.tasks.length > 0) {
+        var todoItems = planObj.tasks.map((t: any) => ({ id: t.id || "", goal: t.goal || t.description || "" }));
+        yield "[todo_list]" + JSON.stringify({ tasks: todoItems }) + "\n";
+      }
+
       // ============================================================
       // 阶段3: Execute — LLM 驱动执行（调用 SDK Tools）
       // ============================================================
@@ -502,15 +514,21 @@ class GlobalAgent {
       });
 
 
-      // 流式输出生成内容（\n → [br] 防 SSE 断裂，前端还原为 Markdown 断句）
+      // 流式输出生成内容（\n → [br]，防标记切割）
       var generateStream = await this.llm.stream(generateMessages);
       var genBuffer = "";
       for await (var genChunk of generateStream) {
         genBuffer += genChunk.content.toString().replace(/\n/g, "[br]");
-        // 按自然间隔 yield，不切断 [br] 标记
-        if (genBuffer.length >= 50) {
-          yield "[content]" + genBuffer + "\n";
-          genBuffer = "";
+        // 找安全切割点：最后一个完整 [br] 或空格后
+        if (genBuffer.length >= 60) {
+          var cutIdx = Math.max(
+            genBuffer.lastIndexOf("[br][br]", 64) + 8,
+            genBuffer.lastIndexOf("[br]", 64) + 4,
+            genBuffer.lastIndexOf(" ", 64) + 1,
+            60
+          );
+          yield "[content]" + genBuffer.slice(0, cutIdx) + "\n";
+          genBuffer = genBuffer.slice(cutIdx);
         }
       }
       if (genBuffer) {
