@@ -39,6 +39,8 @@ export interface LLMConfig {
   apiKey: string;
   modelName?: string;
   temperature?: number;
+  /** 额外 modelKwargs（如 deepseek-v4 需特殊配置） */
+  modelKwargs?: Record<string, any>;
 }
 
 /** 各厂商的 baseURL 和默认模型映射 */
@@ -77,10 +79,10 @@ export function createChatModel(config: LLMConfig): ChatOpenAI {
   const providerCfg = PROVIDER_CONFIG[config.provider];
   const model = config.modelName || providerCfg.defaultModel;
 
-  const modelKwargs: Record<string, any> = {};
+  const modelKwargs: Record<string, any> = { ...(config.modelKwargs || {}) };
 
   // DeepSeek: 默认 thinking mode 在 tool calling 中会报 reasoning_content 错误，需禁用
-  if (config.provider === "deepseek") {
+  if (config.provider === "deepseek" && !modelKwargs.hasOwnProperty("thinking")) {
     modelKwargs.thinking = { type: "disabled" };
   }
 

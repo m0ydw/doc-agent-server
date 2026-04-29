@@ -101,6 +101,7 @@ export interface GlobalAgentConfig {
   apiKey?: string;
   modelName?: string;
   temperature?: number;
+  modelKwargs?: Record<string, any>;
 }
 
 /** streamProcess 参数 */
@@ -152,11 +153,21 @@ class GlobalAgent {
       apiKey,
       modelName: config?.modelName,
       temperature: config?.temperature ?? 0.1,
+      modelKwargs: config?.modelKwargs,
     });
 
     this.initialized = true;
     console.log("[GlobalAgent] LLM 初始化完成: provider=" + provider +
                 ", model=" + (config?.modelName || "default"));
+  }
+
+  /**
+   * 重新初始化 Agent（切换模型时调用）
+   */
+  reinitialize(config?: GlobalAgentConfig): void {
+    this.llm = null;
+    this.initialized = false;
+    this.initialize(config);
   }
 
   /**
@@ -256,11 +267,11 @@ class GlobalAgent {
       doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
     });
 
-    // 3. 流式输出对话内容（保留 [br] 标记，前端替换为换行）
+    // 3. 流式输出对话内容（\n → [br] 防 SSE 断裂）
     var chatStream = await this.llm!.stream(chatMessages);
     var chatBuffer = "";
     for await (var chunk of chatStream) {
-      chatBuffer += chunk.content.toString();
+      chatBuffer += chunk.content.toString().replace(/\n/g, "[br]");
       if (chatBuffer.length >= 50) {
         yield "[chat]" + chatBuffer + "\n";
         chatBuffer = "";
@@ -491,11 +502,11 @@ class GlobalAgent {
       });
 
 
-      // 流式输出生成内容（保留 [br] 标记，前端替换为换行）
+      // 流式输出生成内容（\n → [br] 防 SSE 断裂，前端还原为 Markdown 断句）
       var generateStream = await this.llm.stream(generateMessages);
       var genBuffer = "";
       for await (var genChunk of generateStream) {
-        genBuffer += genChunk.content.toString();
+        genBuffer += genChunk.content.toString().replace(/\n/g, "[br]");
         // 按自然间隔 yield，不切断 [br] 标记
         if (genBuffer.length >= 50) {
           yield "[content]" + genBuffer + "\n";

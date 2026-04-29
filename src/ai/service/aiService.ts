@@ -4,6 +4,7 @@
 
 import { Request, Response } from "express";
 import { getGlobalAgent } from "../agent/globalAgent";
+import type { LLMProvider } from "../core/llm";
 
 /**
  * 向全局 Agent 发送消息，SSE 流式返回
@@ -24,6 +25,15 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     var message = body.message;
     var contextDocId = body.contextDocId;
     var mode: "workflow" | "chat" = (body.mode === "chat" ? "chat" : "workflow");
+    var modelConfig = body.modelConfig as { provider?: string; apiKey?: string; model?: string; modelKwargs?: Record<string, any> } | undefined;
+
+    // 映射前端字段到 GlobalAgentConfig
+    var agentConfig = modelConfig ? {
+      provider: modelConfig.provider as any,
+      apiKey: modelConfig.apiKey,
+      modelName: modelConfig.model,
+      modelKwargs: modelConfig.modelKwargs,
+    } : undefined;
 
     if (!message || typeof message !== "string" || message.trim().length === 0) {
       res.status(400).write("错误: message 不能为空");
@@ -34,12 +44,15 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     var agent = getGlobalAgent();
 
     if (!agent.isInitialized) {
-      agent.initialize();
+      agent.initialize(agentConfig);
       if (!agent.isInitialized) {
         res.status(500).write("错误: Agent 未初始化，请配置 API Key（检查 .env 文件）");
         res.end();
         return;
       }
+    } else if (agentConfig?.provider) {
+      // 如果客户端指定了不同厂商，重新初始化
+      agent.reinitialize(agentConfig);
     }
 
     var stream = agent.streamProcess({
@@ -95,4 +108,37 @@ function resetAgent(req: Request, res: Response): void {
   });
 }
 
-export { runAgentMessage, getAgentStatus, resetAgent };
+/**
+ * 设置 Agent LLM 配置（立即重新初始化）
+ * POST /api/ai/agent/config
+ */
+function setAgentConfig(req: Request, res: Response): void {
+  try {
+    var body = req.body;
+    var provider = body.provider;
+    var apiKey = body.apiKey;
+    var model = body.model;
+    var modelKwargs = body.modelKwargs;
+
+    if (!provider) {
+      res.status(400).json({ success: false, error: "provider 不能为空" });
+      return;
+    }
+
+    var agent = getGlobalAgent();
+    agent.reinitialize({
+      provider: provider as any,
+      apiKey: apiKey || undefined,
+      modelName: model || undefined,
+      modelKwargs: modelKwargs || undefined,
+    });
+
+    console.log("[aiService] LLM 配置已更新: provider=" + provider + ", model=" + (model || "default"));
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[aiService] 设置 Agent 配置失败:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+export { runAgentMessage, getAgentStatus, resetAgent, setAgentConfig };
