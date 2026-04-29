@@ -20,9 +20,11 @@ export const chatSystemPrompt = ChatPromptTemplate.fromMessages([
 - 使用 - 或 1. 创建列表
 - 使用 **加粗** 突出关键词
 - 如果文档内容较多，只提取与问题相关的部分
+- **换行标记：需要换行处使用 [br]（如：## 概述[br]这是第一段。[br][br]## 核心），不要使用真实换行符**
 
 禁止事项：
-- 不要输出 JSON 格式数据`],
+- 不要输出 JSON 格式数据
+- 不要输出任何真实的换行符 \n，全部用 [br] 替代`],
   ["human", `## 用户问题
 {user_input}
 

@@ -256,29 +256,18 @@ class GlobalAgent {
       doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
     });
 
-    // 3. 流式输出对话内容（按行 yield，保留 Markdown 格式）
+    // 3. 流式输出对话内容（保留 [br] 标记，前端替换为换行）
     var chatStream = await this.llm!.stream(chatMessages);
     var chatBuffer = "";
     for await (var chunk of chatStream) {
-      var token = chunk.content.toString();
-      chatBuffer += token;
-      if (token.includes("\n")) {
-        var lines = chatBuffer.split("\n");
-        for (var li = 0; li < lines.length - 1; li++) {
-          if (lines[li].trim()) {
-            yield "[chat]" + lines[li].trim() + "\n";
-          }
-        }
-        chatBuffer = lines[lines.length - 1];
-      } else if (chatBuffer.length >= 40) {
-        if (chatBuffer.trim()) {
-          yield "[chat]" + chatBuffer.trim() + "\n";
-          chatBuffer = "";
-        }
+      chatBuffer += chunk.content.toString();
+      if (chatBuffer.length >= 50) {
+        yield "[chat]" + chatBuffer + "\n";
+        chatBuffer = "";
       }
     }
-    if (chatBuffer.trim()) {
-      yield "[chat]" + chatBuffer.trim() + "\n";
+    if (chatBuffer) {
+      yield "[chat]" + chatBuffer + "\n";
     }
 
     // 4. 结束
@@ -502,32 +491,19 @@ class GlobalAgent {
       });
 
 
-      // 流式输出生成内容（按行 yield，保留 Markdown 格式）
+      // 流式输出生成内容（保留 [br] 标记，前端替换为换行）
       var generateStream = await this.llm.stream(generateMessages);
       var genBuffer = "";
       for await (var genChunk of generateStream) {
-        var genToken = genChunk.content.toString();
-        genBuffer += genToken;
-        // 按换行 yield：保留 Markdown 结构
-        if (genToken.includes("\n")) {
-          var lines = genBuffer.split("\n");
-          for (var li = 0; li < lines.length - 1; li++) {
-            if (lines[li].trim()) {
-              yield "[content]" + lines[li].trim() + "\n";
-            }
-          }
-          genBuffer = lines[lines.length - 1];
-        } else if (genBuffer.length >= 40) {
-          // 长文本缓冲输出
-          if (genBuffer.trim()) {
-            yield "[content]" + genBuffer.trim() + "\n";
-            genBuffer = "";
-          }
+        genBuffer += genChunk.content.toString();
+        // 按自然间隔 yield，不切断 [br] 标记
+        if (genBuffer.length >= 50) {
+          yield "[content]" + genBuffer + "\n";
+          genBuffer = "";
         }
       }
-      // flush 剩余
-      if (genBuffer.trim()) {
-        yield "[content]" + genBuffer.trim() + "\n";
+      if (genBuffer) {
+        yield "[content]" + genBuffer + "\n";
       }
       yield "[phase]回答生成完成\n";
 
