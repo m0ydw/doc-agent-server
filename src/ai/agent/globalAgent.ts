@@ -63,18 +63,37 @@
  */
 
 import { ChatOpenAI } from "@langchain/openai";
-import { SystemMessage, HumanMessage } from "@langchain/core/messages";
+import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
 import { StructuredTool } from "@langchain/core/tools";
 import { createChatModel } from "../core/llm";
 import type { LLMProvider } from "../core/llm";
 import { AnalyzeTool, PlanTool, ExecuteTool, ValidateTool } from "../tools";
 import { AnalysisOutputTool, PlanOutputTool, ValidateOutputTool } from "../tools/outputSchemas";
+import {
+  analyzeThoughtPrompt, analyzeToolPrompt,
+  planThoughtPrompt, planToolPrompt,
+  validateThoughtPrompt, validateToolPrompt,
+  generateSystemPrompt, chatSystemPrompt,
+  ANTI_LEAK_RULES, CLASSIFICATION_RULES, LANGUAGE_RULES,
+} from "../prompts";
 import { retrieveMemory, manageMemory, clearMemories, getMemories } from "../core/memory";
 import { fileRegistry } from "../../services/fileRegistry";
 import editor from "../../services/editor";
 
 /** 最大重试次数 */
 const MAX_RETRY = 3;
+
+/**
+ * 工具显示名映射 — 用于 SSE 事件中隐藏内部工具名
+ * 拓展：新增 SDK 工具只需在此追加一条映射即可
+ */
+const TOOL_DISPLAY: Record<string, { name: string; args: (a: Record<string, any>) => string }> = {
+  sdk_find_text:   { name: "搜索文本",  args: a => `搜索 "${a.pattern}"` },
+  sdk_replace_text:{ name: "替换文本",  args: a => `将 "${a.target}" 替换为 "${a.replacement}"` },
+  sdk_replace_all: { name: "批量替换",  args: a => `将所有 "${a.target}" 替换为 "${a.replacement}"` },
+  sdk_get_text:    { name: "读取文档",  args: () => "获取文档全文" },
+  sdk_save:        { name: "保存更改",  args: () => "保存文档修改" },
+};
 
 /** 初始化配置 */
 export interface GlobalAgentConfig {
@@ -92,37 +111,9 @@ export interface ProcessParams {
 }
 
 // ================================================================
-// Analyze/Plan/Validate 的 System Prompt（拆分为思考版 + JSON 版）
-// 思考版：只输出思考，不输出 JSON
-// JSON 版：基于思考结果，用 JSON mode 输出结构化数据
+// Analyze/Plan/Validate 的 System Prompt（使用 ChatPromptTemplate）
+// 思考阶段模板由 prompts/ 目录管理，此处仅做阶段编排
 // ================================================================
-
-// --- Analyze ---
-const ANALYZE_THOUGHT_PROMPT = `你是一个文档处理需求的**分析专家**。
-根据用户的自然语言需求和可用文档信息，分析用户的操作意图。
-输出你的思考过程（只需思考，**不要输出 JSON**）。`;
-
-const ANALYZE_JSON_PROMPT = `你是一个文档处理需求的**分析专家**。
-基于以上分析，**你必须调用 output_analysis 工具**来输出结构化的分析结果。
-不要输出文字，只调用工具。`;
-
-// --- Plan ---
-const PLAN_THOUGHT_PROMPT = `你是一个文档处理任务的**规划专家**。
-根据分析结果，制定语义化的任务清单。输出你的思考过程（只需思考，**不要输出 JSON**）。`;
-
-const PLAN_JSON_PROMPT = `你是一个文档处理任务的**规划专家**。
-基于以上分析，**你必须调用 output_plan 工具**来输出结构化的任务计划。
-不要输出文字，只调用工具。`;
-
-// --- Validate ---
-const VALIDATE_THOUGHT_PROMPT = `你是一个文档操作结果的**验证专家**。
-根据执行日志判断操作是否成功。输出你的思考过程（只需思考，**不要输出 JSON**）。`;
-
-const VALIDATE_JSON_PROMPT = `你是一个文档操作结果的**验证专家**。
-基于以上分析，**你必须调用 output_validate 工具**来输出结构化的验证结果。
-不要输出文字，只调用工具。`;
-
-// 旧 prompt 保留（不再直接使用，仅作参考）
 
 /**
  * 全局 Agent 类
@@ -180,7 +171,7 @@ class GlobalAgent {
    * @returns 第2次 JSON 调用结果对象；失败时返回 null
    */
   private async *streamPhaseWithSeparation(
-    thoughtMessages: (SystemMessage | HumanMessage)[],
+    thoughtMessages: BaseMessage[],
     outputTool: StructuredTool,
     toolPrompt: string,
     toolContext: string
@@ -246,38 +237,24 @@ class GlobalAgent {
     _docContext: string
   ): AsyncGenerator<string, void, unknown> {
     // 1. 读取文档文本
-    yield "[tool_start]sdk_get_text|获取文档内容\n";
+    yield "[tool_start]读取文档|获取文档内容\n";
     var docText = "";
     try {
       docText = await editor.getText(docId);
-      yield "[tool]sdk_get_text|获取文档内容\n";
-      yield "[tool_result]✓ 文档全文（" + docText.length + " 字符）\n";
+      yield "[tool_result]✓ 读取文档：文档全文（" + docText.length + " 字符）\n";
     } catch (e: any) {
-      yield "[tool]sdk_get_text|获取文档内容\n";
-      yield "[tool_result]✗ 读取失败：" + (e.message || "未知错误") + "\n";
+      yield "[tool_result]✗ 读取文档：读取失败：" + (e.message || "未知错误") + "\n";
       yield "[error]无法读取文档内容，请检查文档是否正常打开\n";
       return;
     }
 
-    // 2. 构建对话 prompt（强化 Markdown 输出）
-    var chatMessages = [
-      new SystemMessage(
-        `你是文档处理助手。用户正在查看文档"${docName}"。\n` +
-        `请根据文档内容和用户问题，提供结构清晰的回答。\n\n` +
-        `**必须使用 Markdown 格式**，包括：\n` +
-        `- 使用 ## 标题分隔段落\n` +
-        `- 使用 - 或 1. 创建列表\n` +
-        `- 使用 **加粗** 突出关键词\n` +
-        `- 如果文档内容较多，只提取与问题相关的部分\n\n` +
-        `禁止事项：\n` +
-        `- 不要输出 JSON 格式数据`
-      ),
-      new HumanMessage(
-        `## 用户问题\n${userInput}\n\n` +
-        `## 文档内容\n${docText.substring(0, 4000)}` +
-        (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : "")
-      ),
-    ];
+    // 2. 构建对话 prompt
+    var chatMessages = await chatSystemPrompt.formatMessages({
+      doc_name: docName,
+      language_rules: LANGUAGE_RULES,
+      user_input: userInput,
+      doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
+    });
 
     // 3. 流式输出对话内容（按行 yield，保留 Markdown 格式）
     var chatStream = await this.llm!.stream(chatMessages);
@@ -355,7 +332,16 @@ class GlobalAgent {
       return;
     }
 
-    // ============ Workflow 模式：4 阶段流水线 ==========
+    // ============ 内容查询自动路由 === 纯查询 → Chat 模式 ===
+    var contentRE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
+    var modifyRE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
+    if (contentRE.test(userInput) && !modifyRE.test(userInput)) {
+      console.log("[GlobalAgent] 检测到纯内容查询，路由到 Chat 模式");
+      yield* this.runChatMode(targetDocId, targetName, userInput, docContext);
+      return;
+    }
+
+    // ============ Workflow 模式：多阶段流水线 ==========
     // ===== Agent 主循环（支持重试） =====
     var retryCount = 0;
     var cachedDocText = "";  // 文本缓存，避免重复 SDK 读取
@@ -364,21 +350,24 @@ class GlobalAgent {
       var relatedMemory = retrieveMemory(targetDocId, userInput);
 
       // ============================================================
-      // 阶段1: Analyze — 先流式 thought → 再 JSON mode 获取结构化数据
-      yield "[phase:analyze]\n";
+      // 阶段1: Analyze — 先流式 thought → 再 tool calling 获取结构化数据
+      yield "[phase]正在分析您的需求...\n";
 
       var analysisContext = `## 用户需求\n${userInput}\n\n## 当前可用文档\n${docContext}\n\n## 相关历史\n${relatedMemory}`;
 
-      var analysisThoughtMsgs = [
-        new SystemMessage(ANALYZE_THOUGHT_PROMPT),
-        new HumanMessage(analysisContext),
-      ];
+      var analysisThoughtMsgs = await analyzeThoughtPrompt.formatMessages({
+        classification_rules: CLASSIFICATION_RULES,
+        anti_leak_rules: ANTI_LEAK_RULES,
+        user_input: userInput,
+        doc_context: docContext,
+        related_memory: relatedMemory,
+      });
 
       var analysisTool = new AnalysisOutputTool();
       var analysisGen = this.streamPhaseWithSeparation(
         analysisThoughtMsgs,
         analysisTool,
-        ANALYZE_JSON_PROMPT,
+        (await analyzeToolPrompt.formatMessages({ analysis_context: analysisContext }))[0].content as string,
         analysisContext
       );
       var analysisResult = await analysisGen.next();
@@ -399,28 +388,30 @@ class GlobalAgent {
         }
         var cleanAnalysis = JSON.stringify(analysisObj);
       } else {
-        console.warn("[GlobalAgent] Analyze JSON mode 返回 null，使用空分析");
+        console.warn("[GlobalAgent] Analyze tool calling 返回 null，使用空分析");
         var cleanAnalysis = "{}";
       }
-      yield "[phase:analyze:end]\n";
+      yield "[phase]分析完成\n";
 
       // ============================================================
-      // 阶段2: Plan — 先流式 thought → 再 JSON mode 获取结构化数据
-      yield "[phase:plan]\n";
+      // 阶段2: Plan — 先流式 thought → 再 tool calling 获取结构化数据
+      yield "[phase]正在制定执行计划...\n";
 
       var planContext = `## 分析结果\n${cleanAnalysis}\n\n## 当前可用文档\n${docContext}` +
         (cachedDocText ? `\n\n## 已有文档内容片段\n${cachedDocText.substring(0, 2000)}` : "");
 
-      var planThoughtMsgs = [
-        new SystemMessage(PLAN_THOUGHT_PROMPT),
-        new HumanMessage(planContext),
-      ];
+      var planThoughtMsgs = await planThoughtPrompt.formatMessages({
+        anti_leak_rules: ANTI_LEAK_RULES,
+        clean_analysis: cleanAnalysis,
+        doc_context: docContext,
+        doc_snippet: cachedDocText ? cachedDocText.substring(0, 2000) : "",
+      });
 
       var planTool = new PlanOutputTool();
       var planGen = this.streamPhaseWithSeparation(
         planThoughtMsgs,
         planTool,
-        PLAN_JSON_PROMPT,
+        (await planToolPrompt.formatMessages({ plan_context: planContext }))[0].content as string,
         planContext
       );
       var planResult = await planGen.next();
@@ -440,15 +431,15 @@ class GlobalAgent {
         }
         var cleanPlan = JSON.stringify(planObj);
       } else {
-        console.warn("[GlobalAgent] Plan JSON mode 返回 null，使用空计划");
+        console.warn("[GlobalAgent] Plan tool calling 返回 null，使用空计划");
         var cleanPlan = '{"tasks":[]}';
       }
-      yield "[phase:plan:end]\n";
+      yield "[phase]计划制定完成\n";
 
       // ============================================================
       // 阶段3: Execute — LLM 驱动执行（调用 SDK Tools）
       // ============================================================
-      yield "[phase:execute]\n";
+      yield "[phase]正在处理文档...\n";
 
       var executeTool = new ExecuteTool(this.llm);
       var executeResultStr = await executeTool._call({
@@ -456,7 +447,7 @@ class GlobalAgent {
         docId: targetDocId,
       });
 
-      // 解析执行结果，发出结构化 tool 事件
+      // 解析执行结果，发出结构化 tool 事件（使用自然语言显示名）
       var executionLog = executeResultStr;
       try {
         var parsedExec = JSON.parse(executeResultStr);
@@ -464,9 +455,10 @@ class GlobalAgent {
         // 发出每个工具调用事件
         if (parsedExec.tool_calls && Array.isArray(parsedExec.tool_calls)) {
           for (var tc of parsedExec.tool_calls) {
-            yield "[tool_start]" + tc.tool + "|" + (tc.args || "{}") + "\n";
-            yield "[tool]" + tc.tool + "|" + (tc.args || "{}") + "\n";
-            yield "[tool_result]" + (tc.status === "success" ? "✓ " : "✗ ") + (tc.result || "") + "\n";
+            var disp = TOOL_DISPLAY[tc.tool] || { name: tc.tool, args: () => JSON.stringify(tc.args || {}) };
+            var dispArgs = disp.args(tc.args || {});
+            yield "[tool_start]" + disp.name + "|" + dispArgs + "\n";
+            yield "[tool_result]" + (tc.status === "success" ? "✓ " : "✗ ") + disp.name + "：" + (tc.result || "完成") + "\n";
             // 缓存文档文本，避免重试时重复调用 sdk_get_text
             if (tc.tool === "sdk_get_text" && tc.status === "success" && tc.result) {
               var textMatch = tc.result.match(/：(.+)/);
@@ -476,12 +468,12 @@ class GlobalAgent {
         }
       } catch { /* keep raw */ }
 
-      yield "[phase:execute:end]\n";
+      yield "[phase]文档处理完成\n";
 
       // ============================================================
       // 阶段4: Generate — 基于执行结果生成用户可见的回答
       // ============================================================
-      yield "[phase:generate]\n";
+      yield "[phase]正在生成回答...\n";
 
       // 从工具调用结果中提取文档文本片段
       var docSnippet = "";
@@ -490,10 +482,8 @@ class GlobalAgent {
         if (parsedExecForGen.tool_calls && Array.isArray(parsedExecForGen.tool_calls)) {
           for (var tc2 of parsedExecForGen.tool_calls) {
             if (tc2.tool === "sdk_get_text" && tc2.result) {
-              // 提取 sdk_get_text 的结果文本（格式："文档全文（N 字符）：..."）
               var textMatch = tc2.result.match(/：(.+)/);
               docSnippet = textMatch ? textMatch[1] : tc2.result;
-              // 截取前 4000 字符避免 context 溢出
               if (docSnippet.length > 4000) {
                 docSnippet = docSnippet.substring(0, 4000) + "...(已截断)";
               }
@@ -503,31 +493,14 @@ class GlobalAgent {
         }
       } catch { /* 忽略提取失败 */ }
 
-      // 构建生成 prompt（强化 Markdown 输出要求）
-      var generateMessages = [
-        new SystemMessage(
-          `你是文档处理助手。根据用户需求，基于文档内容生成**详细全面的回答**。\n\n` +
-          `**必须使用 Markdown 格式**，包括：\n` +
-          `- 使用 ## 标题分隔段落（概述、核心内容、关键发现、总结等）\n` +
-          `- 使用 - 或 1. 创建列表，尽可能列出文档中的具体信息\n` +
-          `- 使用 **加粗** 突出关键词和人名、项目名\n` +
-          `- 对于总结类请求，至少输出 3 个章节，每个章节列出 2-5 个要点\n` +
-          `- 引用文档中的具体数据、名称、日期\n\n` +
-          `禁止事项：\n` +
-          `- 不要输出 JSON 格式数据\n` +
-          `- 不要说"文档内容为空"或"无法总结"——文档内容已在下方提供\n` +
-          `- 不要过于简略，要充分利用提供的文档内容\n\n` +
-          `示例输出格式：\n` +
-          `## 概述\n文档是一份关于...的申报材料，由...学院申报...\n\n` +
-          `## 核心内容\n- 项目名称：**xxx**\n- 负责人：**xxx**\n- 申报日期：...\n\n` +
-          `## 关键发现\n1. 该文档包含...\n2. 值得注意的是...\n\n## 总结\n综上所述，...`
-        ),
-        new HumanMessage(
-          `## 用户需求\n${userInput}\n\n` +
-          `## 执行结果摘要\n${executionLog.split("\n").slice(0, 10).join("\n")}\n\n` +
-          `## 文档内容片段\n${docSnippet || "（无文档内容）"}`
-        ),
-      ];
+      // 使用模板构建消息
+      var generateMessages = await generateSystemPrompt.formatMessages({
+        language_rules: LANGUAGE_RULES,
+        user_input: userInput,
+        execution_summary: executionLog.split("\n").slice(0, 10).join("\n"),
+        doc_snippet: docSnippet || "（无文档内容）",
+      });
+
 
       // 流式输出生成内容（按行 yield，保留 Markdown 格式）
       var generateStream = await this.llm.stream(generateMessages);
@@ -556,24 +529,25 @@ class GlobalAgent {
       if (genBuffer.trim()) {
         yield "[content]" + genBuffer.trim() + "\n";
       }
-      yield "[phase:generate:end]\n";
+      yield "[phase]回答生成完成\n";
 
       // ============================================================
-      // 阶段5: Validate — 先流式 thought → 再 JSON mode 获取验证结果
-      yield "[phase:validate]\n";
+      // 阶段5: Validate — 先流式 thought → 再 tool calling 获取验证结果
+      yield "[phase]正在验证结果...\n";
 
       var validateContext = `## 执行日志\n${executionLog}\n\n## 原始任务\n${cleanPlan}`;
 
-      var validateThoughtMsgs = [
-        new SystemMessage(VALIDATE_THOUGHT_PROMPT),
-        new HumanMessage(validateContext),
-      ];
+      var validateThoughtMsgs = await validateThoughtPrompt.formatMessages({
+        anti_leak_rules: ANTI_LEAK_RULES,
+        execution_log: executionLog,
+        plan_tasks: cleanPlan,
+      });
 
       var validateTool = new ValidateOutputTool();
       var validateGen = this.streamPhaseWithSeparation(
         validateThoughtMsgs,
         validateTool,
-        VALIDATE_JSON_PROMPT,
+        (await validateToolPrompt.formatMessages({ validate_context: validateContext }))[0].content as string,
         validateContext
       );
       var validateResult = await validateGen.next();
@@ -592,7 +566,7 @@ class GlobalAgent {
           }
         }
       }
-      yield "[phase:validate:end]\n";
+      yield "[phase]验证完成\n";
 
       // ============================================================
       // 解析验证结果（直接从 JSON 对象读取，无需 JSON.parse）
@@ -692,7 +666,14 @@ class GlobalAgent {
    */
   private generatePhaseSummaryFromObj(phase: string, data: Record<string, any>): string {
     if (phase === "analyze") {
+      var intent = data.intent || "";
       var ops = data.operations || [];
+      // 内容查询意图：展示用户想了解什么
+      if (intent === "content_query" || (ops.length > 0 && ops[0].type === "query")) {
+        var queryGoal = ops[0]?.goal || "了解文档内容";
+        return "用户想了解：" + queryGoal;
+      }
+      // 修改操作意图
       if (ops.length === 0) return "未识别到具体操作";
       var summary = "已识别 " + ops.length + " 个操作：";
       for (var op of ops) {

@@ -56,6 +56,7 @@ import { z } from "zod";
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKSaveTool } from "./sdkTools";
+import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
 
 /** ExecuteTool 的输入参数 schema */
 const ExecuteInputSchema = z.object({
@@ -93,44 +94,25 @@ export interface ExecuteResult {
 }
 
 // ================================================================
-// System Prompt for the Execute LLM
-// 这个 Prompt 定义了 LLM 作为"智能操作员"的行为准则
+// System Prompt for the Execute LLM — 使用 ChatPromptTemplate
+// 拓展：新增工具只需在 TOOL_DESCRIPTIONS 追加条目
 // ================================================================
-const EXECUTE_SYSTEM_PROMPT = `你是一个文档操作的**智能执行专家**。你**已经拥有**直接调用文档操作工具的能力，不需要任何外部服务或工具。
+const TOOL_DESCRIPTIONS = [
+  { name: "sdk_get_text()", description: "读取文档全文" },
+  { name: "sdk_find_text(文本)", description: "查找指定文本在文档中的位置" },
+  { name: "sdk_replace_text(目标, 替换)", description: "替换第一个匹配的文本" },
+  { name: "sdk_replace_all(目标, 替换)", description: "替换全部匹配的文本" },
+  { name: "sdk_save()", description: "保存文档修改" },
+];
 
-【重要！你必须知道的工具清单】
-以下 5 个工具已在你手中，直接调用即可，无需联网、无需第三方 API：
-1. sdk_get_text() — ★★★ 核心工具！用于读取文档全文。对于"总结/分析/提取/翻译/查找"等需要理解文档内容的任务，必须**先调用此工具**获取内容，然后自行分析
-2. sdk_find_text(pattern) — 在文档中查找指定文本，返回匹配位置
-3. sdk_replace_text(target, replacement) — 替换第一个匹配的文本
-4. sdk_replace_all(target, replacement) — 替换所有匹配的文本
-5. sdk_save() — 保存文档修改
-
-【通用执行策略】
-
-🔥 场景一：需要理解文档内容的任务（总结、分析、提取、翻译、查找信息）
-→ 第 1 步：调用 sdk_get_text() 获取全文
-→ 第 2 步：阅读获取到的文本内容
-→ 第 3 步：直接基于内容完成总结/分析/回答
-→ 不需要任何外部工具，你的 LLM 能力就是处理文本的最佳工具！
-
-🔥 场景二：替换/修改文本的任务
-→ 第 1 步：调用 sdk_find_text 确认目标文本是否存在、在什么位置
-→ 第 2 步：调用 sdk_replace_text 或 sdk_replace_all 执行替换
-→ 第 3 步：调用 sdk_get_text 验证结果
-
-🔥 场景三：设置格式的任务（加粗、改颜色等，暂未实现对应工具）
-→ 由于格式工具暂未开放，遇到此类任务请记录为"格式操作未实现"
-
-【异常处理】
-- sdk_find_text 找不到目标：尝试更短的词、去掉标点、考虑可能的漏字
-- sdk_replace_text 失败：记录失败原因，继续下一个任务
-- 连续失败 3 次：跳过该任务，标记为 failed
-
-【输出要求】
-1. 每完成一个操作，用中文记录操作内容和结果
-2. 所有任务完成后，汇总任务执行情况
-3. 全部完成时务必调用 sdk_save() 保存文档`;
+async function buildExecuteSystemMessage(): Promise<SystemMessage> {
+  const toolList = buildToolList(TOOL_DESCRIPTIONS);
+  const messages = await executeSystemPrompt.formatMessages({
+    tool_list: toolList,
+    execution_style_rules: EXECUTION_STYLE_RULES,
+  });
+  return messages[0] as SystemMessage;
+}
 
 export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
   name = "execute_tasks";
@@ -211,8 +193,9 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
     const llmWithTools = this.llm.bindTools(this.sdkTools);
 
     // 构建消息列表
+    const systemMsg = await buildExecuteSystemMessage();
     const messages: any[] = [
-      new SystemMessage(EXECUTE_SYSTEM_PROMPT),
+      systemMsg,
       new HumanMessage(
         `请按以下任务清单操作文档（文档ID: ${this.docId}）：\n\n` +
         JSON.stringify(tasks, null, 2) +

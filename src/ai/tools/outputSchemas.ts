@@ -23,14 +23,14 @@ import { z } from "zod";
 
 export const AnalysisOutputSchema = z.object({
   /** 用户需求的总体意图分类 */
-  intent: z.enum(["text_replace", "format_change", "mixed", "other"])
-    .describe("用户需求的意图类型：text_replace=文本替换, format_change=格式修改, mixed=混合操作, other=其他"),
+  intent: z.enum(["content_query", "text_replace", "format_change", "mixed", "other"])
+    .describe("意图类型：content_query=内容查询/总结/提问, text_replace=文本替换, format_change=格式修改, mixed=混合, other=其他"),
   /** 识别出的所有操作意图 */
   operations: z.array(z.object({
-    type: z.enum(["replace", "format", "insert", "delete", "save"])
-      .describe("操作类型"),
+    type: z.enum(["query", "replace", "format", "insert", "delete", "save"])
+      .describe("操作类型：query=查询/总结内容, replace=替换, format=格式, insert=插入, delete=删除, save=保存"),
     target: z.string().describe("操作目标描述，如'公司'、'标题'"),
-    goal: z.string().describe("用户想要达成的效果，如'替换为集团'、'加粗'"),
+    goal: z.string().describe("用户想要达成的效果，如'替换为集团'、'了解项目内容'"),
     details: z.string().optional().describe("补充说明，如'全文替换'、'只改第一处'"),
   })).describe("需要执行的操作列表，至少包含一个操作"),
   /** 上下文提示 */
@@ -62,7 +62,7 @@ export class AnalysisOutputTool extends StructuredTool {
 export const PlanOutputSchema = z.object({
   /** 任务清单 */
   tasks: z.array(z.object({
-    id: z.string().describe("任务唯一ID，如'task-1'"),
+    id: z.string().describe("任务简短描述作为ID，如'替换公司名'，不使用task-1这种编号"),
     goal: z.string().describe("任务的一句话目标，如'将全文公司替换为集团'"),
     description: z.string().describe("详细描述要完成的任务"),
     constraints: z.array(z.string()).optional()
