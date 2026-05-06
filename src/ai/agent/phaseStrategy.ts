@@ -24,6 +24,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
 import { StructuredTool } from "@langchain/core/tools";
 import { extractJson } from "../core/jsonExtractor";
+import { sseThought, sseWarning } from "../core/sseEmitter";
 
 // ================================================================
 // 流式切割常量（消除魔法数字，改进项 #6）
@@ -37,6 +38,44 @@ export const STREAM_CHUNK_SIZE = 60;
 
 /** 切割点搜索窗口（在 chunk 末尾搜索自然断点） */
 export const STREAM_CUT_WINDOW = 64;
+
+// ================================================================
+// 公共流式切割函数（消除 chat/generate 两处 100% 重复，改进项 #15）
+// ================================================================
+
+/**
+ * 对 LLM 流式输出进行自然断句切割（async generator）
+ *
+ * 两处使用场景：
+ *   - Chat 模式: prefix="[chat]"
+ *   - Generate 阶段: prefix="[content]"
+ *
+ * @param stream   LLM 流式响应
+ * @param prefix   SSE 事件前缀
+ * @yields 切割后的分片（JSON 编码保护多行内容）
+ */
+export async function* streamWithCutting(
+  stream: AsyncIterable<{ content: { toString(): string } }>,
+  emit: (content: string) => string
+): AsyncGenerator<string, void, unknown> {
+  let buffer = "";
+  for await (const chunk of stream) {
+    buffer += chunk.content.toString();
+    if (buffer.length >= STREAM_CHUNK_SIZE) {
+      const cutIdx = Math.max(
+        buffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
+        buffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
+        buffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
+        STREAM_CHUNK_SIZE
+      );
+      yield emit(buffer.slice(0, cutIdx));
+      buffer = buffer.slice(cutIdx);
+    }
+  }
+  if (buffer) {
+    yield emit(buffer);
+  }
+}
 
 // ================================================================
 // 1. 策略接口
@@ -299,7 +338,7 @@ export function createPhaseStrategy(modelName?: string): PhaseStreamStrategy {
  */
 export function* emitWarning(message: string): Generator<string, void, unknown> {
   console.warn("[phaseStrategy]", message);
-  yield "[warning]" + message + "\n";
+  yield sseWarning(message);
 }
 
 /**
@@ -310,11 +349,11 @@ function* emitThoughtChunks(text: string): Generator<string, void, unknown> {
   let buffer = text.replace(/\n/g, " ");
   while (buffer.length >= THOUGHT_CHUNK_SIZE) {
     const line = buffer.slice(0, THOUGHT_CHUNK_SIZE).trim();
-    if (line) yield "[thought]" + line + "\n";
+    if (line) yield sseThought(line);
     buffer = buffer.slice(THOUGHT_CHUNK_SIZE);
   }
   if (buffer.trim()) {
-    yield "[thought]" + buffer.trim() + "\n";
+    yield sseThought(buffer.trim());
   }
 }
 

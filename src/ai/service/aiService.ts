@@ -6,12 +6,14 @@ import { Request, Response } from "express";
 import { getGlobalAgent } from "../agent/globalAgent";
 import type { LLMProvider } from "../core/llm";
 
+import { sseError } from "../core/sseEmitter";
+
 /**
  * 向全局 Agent 发送消息，SSE 流式返回
  * POST /api/ai/agent/message
  */
 async function runAgentMessage(req: Request, res: Response): Promise<void> {
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
@@ -36,7 +38,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     } : undefined;
 
     if (!message || typeof message !== "string" || message.trim().length === 0) {
-      res.status(400).write("错误: message 不能为空");
+      res.status(400).write(sseError("message 不能为空"));
       res.end();
       return;
     }
@@ -46,7 +48,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     if (!agent.isInitialized) {
       agent.initialize(agentConfig);
       if (!agent.isInitialized) {
-        res.status(500).write("错误: Agent 未初始化，请配置 API Key（检查 .env 文件）");
+        res.status(500).write(sseError("Agent 未初始化，请配置 API Key（检查 .env 文件）"));
         res.end();
         return;
       }
@@ -72,7 +74,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     } else {
-      res.write("\n错误: " + error.message);
+      res.write(sseError(error.message));
       res.end();
     }
   }

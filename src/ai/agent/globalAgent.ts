@@ -83,7 +83,8 @@ import {
   ANTI_LEAK_RULES, CLASSIFICATION_RULES, LANGUAGE_RULES,
 } from "../prompts";
 import { runPhase } from "./phaseRunner";
-import { createPhaseStrategy, THOUGHT_CHUNK_SIZE, STREAM_CHUNK_SIZE, STREAM_CUT_WINDOW } from "./phaseStrategy";
+import { createPhaseStrategy, streamWithCutting } from "./phaseStrategy";
+import { ssePhaseStart, ssePhaseStatus, ssePhaseEnd, sseDocTarget, sseContent, sseChat, sseToolStart, sseToolResult, sseSummary, sseError, sseTodoList, sseTodoDone } from "../core/sseEmitter";
 import type { PhaseStreamStrategy } from "./phaseStrategy";
 import type { AnalysisResult, PlanResult, ValidateResult, PhaseConfig } from "./types";
 import { retrieveMemory, manageMemory, clearMemories, getMemories } from "../core/memory";
@@ -92,6 +93,19 @@ import editor from "../../services/editor";
 
 /** 最大重试次数 */
 const MAX_RETRY = 3;
+
+/** 文档文本截断长度（Chat 模式传给 LLM 的最大字符数） */
+const MAX_DOC_CONTEXT_CHARS = 4000;
+
+/** executeTool 返回的文档片段最大长度 */
+const MAX_DOC_SNIPPET_CHARS = 4000;
+
+/**
+ * 内容查询关键词语义模式（改进项 #13）
+ * TODO: 未来改为依赖 Analyze 阶段的 intent 字段路由，而非正则匹配
+ */
+const CONTENT_QUERY_PATTERN = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
+const MODIFY_PATTERN = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
 
 /** 初始化配置 */
 export interface GlobalAgentConfig {
@@ -189,14 +203,14 @@ class GlobalAgent {
     _docContext: string
   ): AsyncGenerator<string, void, unknown> {
     // 1. 读取文档文本
-    yield "[tool_start]读取文档|获取文档内容\n";
+    yield sseToolStart("读取文档", "获取文档内容");
     let docText = "";
     try {
       docText = await editor.getText(docId);
-      yield "[tool_result]✓ 读取文档：文档全文（" + docText.length + " 字符）\n";
+      yield sseToolResult(true, "读取文档", "文档全文（" + docText.length + " 字符）");
     } catch (e: any) {
-      yield "[tool_result]✗ 读取文档：读取失败：" + (e.message || "未知错误") + "\n";
-      yield "[error]无法读取文档内容，请检查文档是否正常打开\n";
+      yield sseToolResult(false, "读取文档", "读取失败：" + (e.message || "未知错误"));
+      yield sseError("无法读取文档内容，请检查文档是否正常打开");
       return;
     }
 
@@ -205,36 +219,20 @@ class GlobalAgent {
       doc_name: docName,
       language_rules: LANGUAGE_RULES,
       user_input: userInput,
-      doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
+      doc_text: docText.substring(0, MAX_DOC_CONTEXT_CHARS) + (docText.length > MAX_DOC_CONTEXT_CHARS ? "\n（文档较长，以上为前 " + MAX_DOC_CONTEXT_CHARS + " 字符）" : ""),
     });
 
-    // 3. 流式输出对话内容（用 JSON 编码保护多行内容）
+    // 3. 流式输出对话内容
     const chatStream = await this.llm!.stream(chatMessages);
-    let chatBuffer = "";
-    for await (const chunk of chatStream) {
-      chatBuffer += chunk.content.toString();
-      if (chatBuffer.length >= STREAM_CHUNK_SIZE) {
-        const cutIdx = Math.max(
-          chatBuffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
-          chatBuffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
-          chatBuffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
-          STREAM_CHUNK_SIZE
-        );
-        yield "[chat]" + JSON.stringify(chatBuffer.slice(0, cutIdx)) + "\n";
-        chatBuffer = chatBuffer.slice(cutIdx);
-      }
-    }
-    if (chatBuffer) {
-      yield "[chat]" + JSON.stringify(chatBuffer) + "\n";
-    }
+    yield* streamWithCutting(chatStream, sseChat);
 
     // 4. 结束
-    yield "[summary]" + JSON.stringify({
+    yield sseSummary({
       result: "success",
       summary_text: "",
       detail: "",
       failed_tasks: [],
-    }) + "\n";
+    });
   }
 
   // ============================================================
@@ -260,7 +258,7 @@ class GlobalAgent {
    */
   async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
     if (!this.initialized || !this.llm || !this.phaseStrategy) {
-      yield "[error]Agent 未初始化，请先配置 API Key\n";
+      yield sseError("Agent 未初始化，请先配置 API Key");
       return;
     }
 
@@ -272,12 +270,12 @@ class GlobalAgent {
     // 确定目标文档
     const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
     if (!targetDocId) {
-      yield "[error]无法确定目标文档，请先上传 .docx 文件\n";
+      yield sseError("无法确定目标文档，请先上传 .docx 文件");
       return;
     }
 
     const targetName = (fileRegistry.get(targetDocId)?.originalName) || targetDocId;
-    yield "[phase:start]doc_target|" + targetName + "\n";
+    yield sseDocTarget(targetName);
 
     // ============ Chat 模式：直接对话回答 ============
     if (mode === "chat") {
@@ -286,9 +284,7 @@ class GlobalAgent {
     }
 
     // ============ 内容查询自动路由 === 纯查询 → Chat 模式 ===
-    const contentRE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
-    const modifyRE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
-    if (contentRE.test(userInput) && !modifyRE.test(userInput)) {
+    if (CONTENT_QUERY_PATTERN.test(userInput) && !MODIFY_PATTERN.test(userInput)) {
       console.log("[GlobalAgent] 检测到纯内容查询，路由到 Chat 模式");
       yield* this.runChatMode(targetDocId, targetName, userInput, docContext);
       return;
@@ -306,7 +302,7 @@ class GlobalAgent {
       // ============================================================
       // 阶段1: Analyze — 使用 runPhase（改进项 2, 7）
       // ============================================================
-      yield "[phase]正在分析您的需求...\n";
+      yield ssePhaseStatus("正在分析您的需求...");
 
       const analyzeObj: AnalysisResult | null = yield* runPhase<AnalysisResult>(
         llm,
@@ -333,7 +329,7 @@ class GlobalAgent {
       // ============================================================
       // 阶段2: Plan — 使用 runPhase（改进项 2, 7）
       // ============================================================
-      yield "[phase]正在制定执行计划...\n";
+      yield ssePhaseStatus("正在制定执行计划...");
 
       const planObj: PlanResult | null = yield* runPhase<PlanResult>(
         llm,
@@ -364,13 +360,13 @@ class GlobalAgent {
             return !goal.includes("保存") && !goal.includes("储存") && !goal.includes("存储");
           })
           .map((t) => ({ id: t.id || "", goal: t.goal || t.description || "" }));
-        yield "[todo_list]" + JSON.stringify({ tasks: todoItems }) + "\n";
+        yield sseTodoList(todoItems);
       }
 
       // ============================================================
       // 阶段3: Execute — LLM 驱动执行（改进项 3, 4）
       // ============================================================
-      yield "[phase]正在处理文档...\n";
+      yield ssePhaseStatus("正在处理文档...");
 
       const executeTool = new ExecuteTool(this.llm);
       // 改进项 3：使用 invoke() 替代 _call()
@@ -399,10 +395,14 @@ class GlobalAgent {
         }
 
         const dispArgs = meta.argsFormatter(rawArgs);
-        yield "[tool_start]" + meta.displayName + "|" + dispArgs + "\n";
+        yield sseToolStart(meta.displayName, dispArgs);
         // 微延迟模拟流式工具执行
         await new Promise(r => setTimeout(r, 150));
-        yield "[tool_result]" + (tc.status === "success" ? "✓ " : "✗ ") + meta.displayName + "：" + (tc.result || "完成") + "\n";
+        yield sseToolResult(
+          tc.status === "success",
+          meta.displayName,
+          tc.result || "完成"
+        );
 
         // 缓存文档文本
         if (tc.tool === "sdk_get_text" && tc.status === "success" && tc.result) {
@@ -411,15 +411,15 @@ class GlobalAgent {
         }
       }
 
-      yield "[phase]文档处理完成\n";
+      yield ssePhaseEnd("execute");
 
       // ============================================================
       // 阶段4: Generate — 基于执行结果生成用户可见的回答
       // ============================================================
-      yield "[phase]正在生成回答...\n";
+      yield ssePhaseStatus("正在生成回答...");
 
       // 改进项 3：使用抽离的 extractDocSnippet 函数
-      const docSnippet = extractDocSnippet(executeResultStr, 4000);
+      const docSnippet = extractDocSnippet(executeResultStr, MAX_DOC_SNIPPET_CHARS);
 
       const generateMessages = await generateSystemPrompt.formatMessages({
         language_rules: LANGUAGE_RULES,
@@ -428,31 +428,15 @@ class GlobalAgent {
         doc_snippet: docSnippet || "（无文档内容）",
       });
 
-      // 流式输出生成内容（用 JSON 编码保护多行内容）
+      // 流式输出生成内容
       const generateStream = await this.llm.stream(generateMessages);
-      let genBuffer = "";
-      for await (const genChunk of generateStream) {
-        genBuffer += genChunk.content.toString();
-        if (genBuffer.length >= STREAM_CHUNK_SIZE) {
-          const cutIdx = Math.max(
-            genBuffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
-            genBuffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
-            genBuffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
-            STREAM_CHUNK_SIZE
-          );
-          yield "[content]" + JSON.stringify(genBuffer.slice(0, cutIdx)) + "\n";
-          genBuffer = genBuffer.slice(cutIdx);
-        }
-      }
-      if (genBuffer) {
-        yield "[content]" + JSON.stringify(genBuffer) + "\n";
-      }
-      yield "[phase]回答生成完成\n";
+      yield* streamWithCutting(generateStream, sseContent);
+      yield ssePhaseEnd("generate");
 
       // ============================================================
       // 阶段5: Validate — 使用 runPhase（改进项 2, 7）
       // ============================================================
-      yield "[phase]正在验证结果...\n";
+      yield ssePhaseStatus("正在验证结果...");
 
       const validateObj: ValidateResult | null = yield* runPhase<ValidateResult>(
         llm,
@@ -527,7 +511,7 @@ class GlobalAgent {
           detail: validateSummary || "操作已成功执行",
           failed_tasks: [],
         };
-        yield "[summary]" + JSON.stringify(summary) + "\n";
+        yield sseSummary(summary);
         return;
       }
 
@@ -538,7 +522,7 @@ class GlobalAgent {
           detail: validateSummary || "请提供更多信息或确认操作",
           failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
         };
-        yield "[summary]" + JSON.stringify(summary) + "\n";
+        yield sseSummary(summary);
         return;
       }
 
@@ -551,7 +535,7 @@ class GlobalAgent {
           detail: validateSummary || "执行失败，正在重试",
           failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
         };
-        yield "[summary]" + JSON.stringify(summary) + "\n";
+        yield sseSummary(summary);
       } else {
         summary = {
           result: "failed",
@@ -559,7 +543,7 @@ class GlobalAgent {
           detail: validateSummary || "请检查文档是否存在或提供更多信息",
           failed_tasks: failedTasks.length > 0 ? failedTasks : failedSteps,
         };
-        yield "[summary]" + JSON.stringify(summary) + "\n";
+        yield sseSummary(summary);
       }
     }
   }
