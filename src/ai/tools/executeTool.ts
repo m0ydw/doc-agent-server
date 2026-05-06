@@ -57,6 +57,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
 import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKSaveTool } from "./sdkTools";
 import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
+import { extractAndParseJson } from "../core/jsonExtractor";
 
 /** ExecuteTool 的输入参数 schema */
 const ExecuteInputSchema = z.object({
@@ -159,22 +160,18 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
       const planOutput = JSON.parse(input.plan_tasks);
       tasks = planOutput.tasks || [];
     } catch {
-      // JSON 解析失败 → 降级：从原始文本中尝试提取任务，或直接作为描述传给 LLM
+      // JSON 解析失败 → 降级：使用括号计数的安全提取（替代贪婪正则 /\{[\s\S]*\}/）
       console.warn(
         "[ExecuteTool] plan_tasks JSON 解析失败，尝试降级处理，" +
         "plan_len=" + (input.plan_tasks || "").length +
         ", plan_head=" + (input.plan_tasks || "").slice(0, 120).replace(/\n/g, "\\n")
       );
-      // 尝试从文本中提取大括号包裹的 JSON
-      const jsonMatch = input.plan_tasks.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const extracted = JSON.parse(jsonMatch[0]);
-          tasks = extracted.tasks || [];
-          if (tasks.length > 0) {
-            console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + tasks.length);
-          }
-        } catch { /* 二次提取也失败，继续降级 */ }
+      const extracted = extractAndParseJson(input.plan_tasks);
+      if (extracted) {
+        tasks = (extracted as any).tasks || [];
+        if (tasks.length > 0) {
+          console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + tasks.length);
+        }
       }
     }
 
@@ -206,11 +203,15 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
     const log: string[] = [];
     const toolCalls: ToolCallRecord[] = [];
     let taskStatus: Record<string, "success" | "failed" | "skipped"> = {};
+    let consecutiveNoToolCall = 0;  // 连续无工具调用计数器
 
     // tool calling 循环
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await llmWithTools.invoke(messages);
       messages.push(response);
+
+      // 有 tool call：重置计数器
+      consecutiveNoToolCall = 0;
 
       // 检查是否有 tool calls
       if (response.tool_calls && response.tool_calls.length > 0) {
@@ -270,17 +271,19 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
           }
         }
       } else {
-        // LLM 没有调用工具，说明执行完成或 LLM 在总结
+        // LLM 没有调用工具：计数器 +1
+        consecutiveNoToolCall++;
         const content = response.content?.toString() || "";
-        log.push(`[LLM] ${content.slice(0, 300)}`);
+        log.push(`[LLM] (第${consecutiveNoToolCall}轮无工具调用) ${content.slice(0, 300)}`);
 
-        // 检查 LLM 是否表示任务完成
-        if (content.includes("完成") || content.includes("保存") || content.includes("save")) {
+        // 连续2轮无工具调用 → 认为执行完成（替代字符串匹配 "完成"/"保存"）
+        if (consecutiveNoToolCall >= 2) {
+          log.push(`[Execute] LLM 连续${consecutiveNoToolCall}轮无工具调用，自动终止`);
           break;
         }
-        // 如果没有 tool call 也没有完成标记，可能是 LLM 在思考，继续让它执行
+        // 接近最大轮数时也终止（安全兜底）
         if (round > MAX_TOOL_ROUNDS - 3) {
-          log.push(`[Execute] 达到最大轮数，终止执行`);
+          log.push(`[Execute] 达到最大轮数，强制终止`);
           break;
         }
       }
@@ -337,12 +340,13 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
  */
 export function parseExecuteResult(
   rawResult: string
-): { executionLog: string; toolCalls: ToolCallRecord[] } {
+): { executionLog: string; toolCalls: ToolCallRecord[]; success: boolean | null } {
   try {
     const parsed = JSON.parse(rawResult);
     const executionLog = parsed.execution_log || rawResult;
     const toolCalls: ToolCallRecord[] = parsed.tool_calls || [];
-    return { executionLog, toolCalls };
+    const success: boolean | null = typeof parsed.success === "boolean" ? parsed.success : null;
+    return { executionLog, toolCalls, success };
   } catch (e: any) {
     console.warn(
       "[ExecuteTool] JSON 解析失败，使用原始日志作为 execution_log，" +
@@ -350,7 +354,7 @@ export function parseExecuteResult(
       ", raw_len=" + rawResult.length +
       ", raw_head=" + rawResult.slice(0, 120).replace(/\n/g, "\\n")
     );
-    return { executionLog: rawResult, toolCalls: [] };
+    return { executionLog: rawResult, toolCalls: [], success: null };
   }
 }
 

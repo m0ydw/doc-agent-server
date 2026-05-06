@@ -357,3 +357,24 @@ export class SDKSaveTool extends StructuredTool {
     }
   }
 }
+
+// ================================================================
+// 统一 metadata 映射表（单一数据源，改进项 #7）
+// ================================================================
+
+/**
+ * 工具名 → metadata 的单一映射表
+ * 替代 globalAgent.ts、ToolCallBlock.tsx、AssistantCard.tsx 中的多套硬编码映射。
+ *
+ * 用法：
+ *   const meta = SDK_TOOL_METADATA[toolName];
+ *   console.log(meta.displayName);  // "搜索文本"
+ *   console.log(meta.showInUI);     // true
+ */
+export const SDK_TOOL_METADATA: Record<string, SDKToolMetadata> = {
+  [new SDKFindTextTool("").name]:    SDKFindTextTool.metadata,
+  [new SDKReplaceTextTool("").name]: SDKReplaceTextTool.metadata,
+  [new SDKReplaceAllTool("").name]:  SDKReplaceAllTool.metadata,
+  [new SDKGetTextTool("").name]:     SDKGetTextTool.metadata,
+  [new SDKSaveTool("").name]:        SDKSaveTool.metadata,
+};

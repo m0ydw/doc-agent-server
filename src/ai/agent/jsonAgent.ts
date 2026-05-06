@@ -11,6 +11,7 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage } from "@langchain/core/messages";
 import { PROVIDER_CONFIG, type LLMProvider } from "../core/llm";
+import { extractAndParseJson } from "../core/jsonExtractor";
 
 export class JSONAgent {
   private provider: LLMProvider;
@@ -65,12 +66,10 @@ export class JSONAgent {
       try {
         return JSON.parse(cleaned);
       } catch (e1) {
-        // 尝试提取大括号 JSON
-        const match = cleaned.match(/\{[\s\S]*\}/);
-        if (match) {
-          try { return JSON.parse(match[0]); } catch { /* ignore */ }
-        }
-        console.warn("[JSONAgent] JSON.parse 失败, cleaned_head=" + cleaned.slice(0, 120));
+        // 降级：使用括号计数的安全提取（替代贪婪正则 /\{[\s\S]*\}/）
+        const extracted = extractAndParseJson(cleaned);
+        if (extracted) return extracted;
+        console.warn("[JSONAgent] JSON 提取失败, cleaned_head=" + cleaned.slice(0, 120));
         return null;
       }
     } catch (e: any) {

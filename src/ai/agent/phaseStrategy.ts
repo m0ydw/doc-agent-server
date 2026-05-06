@@ -23,6 +23,20 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
 import { StructuredTool } from "@langchain/core/tools";
+import { extractJson } from "../core/jsonExtractor";
+
+// ================================================================
+// 流式切割常量（消除魔法数字，改进项 #6）
+// ================================================================
+
+/** thought 事件单次输出最小字符数（自然断句阈值） */
+export const THOUGHT_CHUNK_SIZE = 150;
+
+/** 流式内容单次输出最小字符数 */
+export const STREAM_CHUNK_SIZE = 60;
+
+/** 切割点搜索窗口（在 chunk 末尾搜索自然断点） */
+export const STREAM_CUT_WINDOW = 64;
 
 // ================================================================
 // 1. 策略接口
@@ -91,11 +105,11 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     let buffer = "";
     for await (const chunk of stream) {
       buffer += chunk.content.toString().replace(/\n/g, " ");
-      // 150 字符自然断句（避免碎片化，与原来一致）
-      if (buffer.length >= 150) {
-        const line = buffer.trim();
+      // 自然断句：按 THOUGHT_CHUNK_SIZE 切割，保留超出部分（修复 #10 buffer 覆盖 bug）
+      while (buffer.length >= THOUGHT_CHUNK_SIZE) {
+        const line = buffer.slice(0, THOUGHT_CHUNK_SIZE).trim();
         if (line) yield "[thought]" + line + "\n";
-        buffer = "";
+        buffer = buffer.slice(THOUGHT_CHUNK_SIZE);  // 保留剩余，而非 buffer = ""
       }
     }
     if (buffer.trim()) {
@@ -254,23 +268,25 @@ export class SingleCallSeparatorStrategy implements PhaseStreamStrategy {
 /**
  * 根据模型能力创建流式策略
  *
- * 当前默认使用 DualCallStrategy（最兼容），未来当模型支持
- * withStructuredOutput + 自定义流式解析器时切换为单调用策略。
+ * 默认使用 DualCallStrategy — 使用 LangChain 标准的 bindTools + invoke API
+ * 确保 LLM 严格按 Zod schema 输出结构化数据。
  *
- * 可以通过环境变量 PHASE_STRATEGY 手动切换：
- *   - PHASE_STRATEGY=singleCall  → 使用 SingleCallSeparatorStrategy
- *   - PHASE_STRATEGY=dualCall    → 使用 DualCallStrategy（默认）
+ * SingleCallSeparatorStrategy 是实验性优化（用分隔符分离文本/JSON），
+ * 由于无法传递 schema，LLM 可能输出错误的 JSON 结构。仅通过环境变量启用：
+ *   - PHASE_STRATEGY=singleCall → 实验性单调用策略
+ *   - 不设环境变量 → 默认 DualCallStrategy（标准 bindTools API）
  */
 export function createPhaseStrategy(modelName?: string): PhaseStreamStrategy {
   const envStrategy = process.env.PHASE_STRATEGY?.trim().toLowerCase();
 
+  // 实验性：单调用策略（通过分隔符分离文本和 JSON，不标准）
   if (envStrategy === "singleCall" || envStrategy === "singlecall") {
-    console.log("[phaseStrategy] 使用 SingleCallSeparatorStrategy（环境变量指定）");
+    console.warn("[phaseStrategy] 使用 SingleCallSeparatorStrategy（实验性，可能产生错误 JSON 结构）");
     return new SingleCallSeparatorStrategy();
   }
 
-  // 默认使用 DualCallStrategy（最兼容，100% 可靠）
-  console.log("[phaseStrategy] 使用 DualCallStrategy（默认，最兼容）");
+  // 默认：标准 LangChain bindTools API
+  console.log("[phaseStrategy] 使用 DualCallStrategy（标准 bindTools API）");
   return new DualCallStrategy();
 }
 
@@ -292,10 +308,10 @@ export function* emitWarning(message: string): Generator<string, void, unknown> 
  */
 function* emitThoughtChunks(text: string): Generator<string, void, unknown> {
   let buffer = text.replace(/\n/g, " ");
-  while (buffer.length >= 150) {
-    const line = buffer.slice(0, 150).trim();
+  while (buffer.length >= THOUGHT_CHUNK_SIZE) {
+    const line = buffer.slice(0, THOUGHT_CHUNK_SIZE).trim();
     if (line) yield "[thought]" + line + "\n";
-    buffer = buffer.slice(150);
+    buffer = buffer.slice(THOUGHT_CHUNK_SIZE);
   }
   if (buffer.trim()) {
     yield "[thought]" + buffer.trim() + "\n";
@@ -303,17 +319,8 @@ function* emitThoughtChunks(text: string): Generator<string, void, unknown> {
 }
 
 /**
- * 清理 JSON 文本：去除 markdown 代码块标记、前后空白
+ * 清理 JSON 文本：使用括号计数安全提取（替代贪婪正则）
  */
 function cleanJsonText(text: string): string {
-  let cleaned = text
-    .replace(/```json\s*/gi, "")
-    .replace(/```\s*/g, "")
-    .trim();
-
-  // 尝试提取最外层花括号包裹的内容
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (match) cleaned = match[0];
-
-  return cleaned;
+  return extractJson(text) || "";
 }

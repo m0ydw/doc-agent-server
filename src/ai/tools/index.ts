@@ -18,7 +18,7 @@ export { parseExecuteResult, extractDocSnippet } from "./executeTool";
 export { ValidateTool } from "./validateTool";
 export type { ValidateOutput } from "./validateTool";
 
-// SDK 工具 + metadata（改进项 4）
+// SDK 工具 + metadata（改进项 4, 7）
 export {
   SDKFindTextTool,
   SDKReplaceTextTool,
@@ -26,5 +26,6 @@ export {
   SDKGetTextTool,
   SDKSaveTool,
   getToolMetadata,
+  SDK_TOOL_METADATA,
 } from "./sdkTools";
 export type { SDKToolMetadata } from "./sdkTools";

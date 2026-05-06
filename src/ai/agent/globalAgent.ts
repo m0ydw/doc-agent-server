@@ -74,8 +74,8 @@ import { createChatModel } from "../core/llm";
 import type { LLMProvider } from "../core/llm";
 import { ExecuteTool } from "../tools/executeTool";
 import { parseExecuteResult, extractDocSnippet } from "../tools/executeTool";
-import { getToolMetadata } from "../tools/sdkTools";
 import type { SDKToolMetadata } from "../tools/sdkTools";
+import { SDK_TOOL_METADATA } from "../tools/sdkTools";
 import { AnalysisOutputTool, PlanOutputTool, ValidateOutputTool } from "../tools/outputSchemas";
 import {
   buildAnalyzePhase, buildPlanPhase, buildValidatePhase,
@@ -83,7 +83,7 @@ import {
   ANTI_LEAK_RULES, CLASSIFICATION_RULES, LANGUAGE_RULES,
 } from "../prompts";
 import { runPhase } from "./phaseRunner";
-import { createPhaseStrategy } from "./phaseStrategy";
+import { createPhaseStrategy, THOUGHT_CHUNK_SIZE, STREAM_CHUNK_SIZE, STREAM_CUT_WINDOW } from "./phaseStrategy";
 import type { PhaseStreamStrategy } from "./phaseStrategy";
 import type { AnalysisResult, PlanResult, ValidateResult, PhaseConfig } from "./types";
 import { retrieveMemory, manageMemory, clearMemories, getMemories } from "../core/memory";
@@ -208,24 +208,24 @@ class GlobalAgent {
       doc_text: docText.substring(0, 4000) + (docText.length > 4000 ? "\n（文档较长，以上为前 4000 字符）" : ""),
     });
 
-    // 3. 流式输出对话内容（\n → [br]，防标记切割）
+    // 3. 流式输出对话内容（用 JSON 编码保护多行内容）
     const chatStream = await this.llm!.stream(chatMessages);
     let chatBuffer = "";
     for await (const chunk of chatStream) {
-      chatBuffer += chunk.content.toString().replace(/\n/g, "[br]");
-      if (chatBuffer.length >= 60) {
+      chatBuffer += chunk.content.toString();
+      if (chatBuffer.length >= STREAM_CHUNK_SIZE) {
         const cutIdx = Math.max(
-          chatBuffer.lastIndexOf("[br][br]", 64) + 8,
-          chatBuffer.lastIndexOf("[br]", 64) + 4,
-          chatBuffer.lastIndexOf(" ", 64) + 1,
-          60
+          chatBuffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
+          chatBuffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
+          chatBuffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
+          STREAM_CHUNK_SIZE
         );
-        yield "[chat]" + chatBuffer.slice(0, cutIdx) + "\n";
+        yield "[chat]" + JSON.stringify(chatBuffer.slice(0, cutIdx)) + "\n";
         chatBuffer = chatBuffer.slice(cutIdx);
       }
     }
     if (chatBuffer) {
-      yield "[chat]" + chatBuffer + "\n";
+      yield "[chat]" + JSON.stringify(chatBuffer) + "\n";
     }
 
     // 4. 结束
@@ -380,11 +380,15 @@ class GlobalAgent {
       }) as string;
 
       // 改进项 3：使用抽离的解析函数
-      const { executionLog, toolCalls } = parseExecuteResult(executeResultStr);
+      const { executionLog, toolCalls, success: executeSuccess } = parseExecuteResult(executeResultStr);
 
       // 逐个 yield tool 事件（改进项 4：使用 getToolMetadata 动态读取）
       for (const tc of toolCalls) {
-        const meta = getToolMetadataFromToolName(tc.tool);
+        const meta: SDKToolMetadata = SDK_TOOL_METADATA[tc.tool] || {
+          displayName: tc.tool,
+          argsFormatter: () => "",
+          showInUI: true,
+        };
         if (!meta.showInUI) continue;  // 替代原来的 if (tc.tool === "sdk_save") continue
 
         let rawArgs: Record<string, unknown> = {};
@@ -424,24 +428,24 @@ class GlobalAgent {
         doc_snippet: docSnippet || "（无文档内容）",
       });
 
-      // 流式输出生成内容（\n → [br]，防标记切割）
+      // 流式输出生成内容（用 JSON 编码保护多行内容）
       const generateStream = await this.llm.stream(generateMessages);
       let genBuffer = "";
       for await (const genChunk of generateStream) {
-        genBuffer += genChunk.content.toString().replace(/\n/g, "[br]");
-        if (genBuffer.length >= 60) {
+        genBuffer += genChunk.content.toString();
+        if (genBuffer.length >= STREAM_CHUNK_SIZE) {
           const cutIdx = Math.max(
-            genBuffer.lastIndexOf("[br][br]", 64) + 8,
-            genBuffer.lastIndexOf("[br]", 64) + 4,
-            genBuffer.lastIndexOf(" ", 64) + 1,
-            60
+            genBuffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
+            genBuffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
+            genBuffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
+            STREAM_CHUNK_SIZE
           );
-          yield "[content]" + genBuffer.slice(0, cutIdx) + "\n";
+          yield "[content]" + JSON.stringify(genBuffer.slice(0, cutIdx)) + "\n";
           genBuffer = genBuffer.slice(cutIdx);
         }
       }
       if (genBuffer) {
-        yield "[content]" + genBuffer + "\n";
+        yield "[content]" + JSON.stringify(genBuffer) + "\n";
       }
       yield "[phase]回答生成完成\n";
 
@@ -482,20 +486,22 @@ class GlobalAgent {
         validateSummary = validateObj.summary || validateObj.result || "";
         failedTasks = validateObj.failed_tasks || [];
       } else {
-        // 回退判断（从执行日志推断）
-        console.warn("[GlobalAgent] Validate 返回 null，从执行日志回退判断");
-        if (executionLog.includes("任务完成") || executionLog.includes("成功")) {
+        // 结构化回退：从 ExecuteResult.success 字段推断（替代字符串匹配）
+        console.warn("[GlobalAgent] Validate 返回 null，使用 ExecuteResult.success 回退");
+        if (executeSuccess === true) {
           success = true;
           retryable = false;
-          validateSummary = "执行完成（验证日志回退）";
-        } else if (executionLog.includes("失败") || executionLog.includes("错误")) {
+          validateSummary = "执行完成（ExecuteResult 确认）";
+        } else if (executeSuccess === false) {
           success = false;
           retryable = true;
-          validateSummary = "执行异常（验证日志回退）";
+          validateSummary = "执行异常（ExecuteResult 确认）";
         } else {
-          success = true;
+          // 无法确定 → 标记为 unknown，触发人工介入
+          success = false;
           retryable = false;
-          validateSummary = "执行完成（默认判断）";
+          needsUserInput = true;
+          validateSummary = "无法自动验证执行结果，需要人工确认";
         }
       }
 
@@ -657,31 +663,6 @@ function generatePlanSummary(data: PlanResult): string {
  */
 function generateValidateSummary(data: ValidateResult): string {
   return data.summary || data.result || "验证完成";
-}
-
-// ================================================================
-// 工具 metadata 辅助（改进项 4）
-// ================================================================
-
-/**
- * 通过工具名获取 metadata
- * 先尝试从 SDK 工具类获取，失败则返回默认值
- */
-function getToolMetadataFromToolName(toolName: string): SDKToolMetadata {
-  // 工具名到显示名的默认映射（兜底）
-  const defaults: Record<string, SDKToolMetadata> = {
-    sdk_find_text:    { displayName: "搜索文本",  argsFormatter: (a) => `搜索 "${a.pattern}"`, showInUI: true },
-    sdk_replace_text: { displayName: "替换文本",  argsFormatter: (a) => `将 "${a.target}" 替换为 "${a.replacement}"`, showInUI: true },
-    sdk_replace_all:  { displayName: "批量替换",  argsFormatter: (a) => `将所有 "${a.target}" 替换为 "${a.replacement}"`, showInUI: true },
-    sdk_get_text:     { displayName: "读取文档",  argsFormatter: () => "获取文档全文", showInUI: true },
-    sdk_save:         { displayName: "保存更改",  argsFormatter: () => "保存文档修改", showInUI: false },
-  };
-
-  return defaults[toolName] || {
-    displayName: toolName,
-    argsFormatter: () => "",
-    showInUI: true,
-  };
 }
 
 // ================================================================
