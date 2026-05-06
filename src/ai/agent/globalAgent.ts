@@ -4,11 +4,12 @@
  * ================================================================
  *
  * 【架构】
- *   LangGraph StateGraph 负责编排：
- *     docTarget → analyze → plan → execute → generate → validate → decide
+ *   WebSocket → wsAgentHandler → graph.streamEvents(["messages","custom"])
+ *   → on_chat_model_stream → thought/content token 流
+ *   → on_chain_end → 阶段摘要 + 最终结果
+ *   → on_custom_event → 工具调用生命周期
  *
- *   流式输出通过 graph.streamEvents() + langgraphToSse() 映射为标准 SSE。
- *   所有 SSE 事件由节点内部通过 dispatchCustomEvent 发射。
+ *   所有流式输出由 LangGraph 标准 streamEvents 驱动，无手搓循环。
  */
 
 import { ChatOpenAI } from "@langchain/openai";
@@ -17,9 +18,7 @@ import { createChatModel } from "../core/llm";
 import type { LLMProvider } from "../core/llm";
 import { createPhaseStrategy } from "./phaseStrategy";
 import type { PhaseStreamStrategy } from "./phaseStrategy";
-import {
-  sseToolStart, sseToolResult, sseError, sseDocTarget, sseSummary, sseChat,
-} from "../core/sseEmitter";
+import { sseToolStart, sseToolResult, sseError, sseDocTarget, sseSummary, sseChat } from "../core/sseEmitter";
 import { chatSystemPrompt, LANGUAGE_RULES } from "../prompts";
 import { clearMemories, getMemories } from "../core/memory";
 import { fileRegistry } from "../../services/fileRegistry";
