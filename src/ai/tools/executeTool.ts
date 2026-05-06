@@ -166,10 +166,10 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
         ", plan_head=" + (input.plan_tasks || "").slice(0, 120).replace(/\n/g, "\\n")
       );
       // 尝试从文本中提取大括号包裹的 JSON
-      var jsonMatch = input.plan_tasks.match(/\{[\s\S]*\}/);
+      const jsonMatch = input.plan_tasks.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
-          var extracted = JSON.parse(jsonMatch[0]);
+          const extracted = JSON.parse(jsonMatch[0]);
           tasks = extracted.tasks || [];
           if (tasks.length > 0) {
             console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + tasks.length);
@@ -227,22 +227,19 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
           }
 
           try {
-            // ================================================================
-            // 【LLM ↔ SDK 对接点】
-            // LLM 决定调用工具 → 工具内部调用 services/editor 的封装函数
-            // editor 函数通过 sessionManager 获取 doc 对象 → 调用 SDK API
-            // ================================================================
             const result = await tool.invoke(toolArgs);
             const resultStr = typeof result === "string" ? result : JSON.stringify(result);
             log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${resultStr.slice(0, 200)}`);
 
-            // 记录结构化工具调用（供前端组件渲染）
-            toolCalls.push({
-              tool: toolName,
-              args: JSON.stringify(toolArgs),
-              result: resultStr.slice(0, 300),
-              status: "success",
-            });
+            // 记录结构化工具调用（保存操作除外——SDK 自动同步）
+            if (toolName !== "sdk_save") {
+              toolCalls.push({
+                tool: toolName,
+                args: JSON.stringify(toolArgs),
+                result: resultStr.slice(0, 300),
+                status: "success",
+              });
+            }
 
             // 记录任务状态：如果是 sdk_replace_text 或 sdk_replace_all，标记对应任务
             if (toolName === "sdk_replace_text" || toolName === "sdk_replace_all") {
@@ -325,4 +322,61 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
       new SDKSaveTool(this.docId),
     ];
   }
+}
+
+// ================================================================
+// 解析辅助函数（改进项 3）
+// 从 ExecuteTool 的原始输出中提取结构化数据，供 globalAgent.ts 使用
+// ================================================================
+
+/**
+ * 解析 ExecuteTool 返回的 JSON 字符串
+ *
+ * @param rawResult - ExecuteTool.invoke() 返回的原始字符串
+ * @returns 解析后的结构（解析失败时返回空工具调用列表和原始日志）
+ */
+export function parseExecuteResult(
+  rawResult: string
+): { executionLog: string; toolCalls: ToolCallRecord[] } {
+  try {
+    const parsed = JSON.parse(rawResult);
+    const executionLog = parsed.execution_log || rawResult;
+    const toolCalls: ToolCallRecord[] = parsed.tool_calls || [];
+    return { executionLog, toolCalls };
+  } catch (e: any) {
+    console.warn(
+      "[ExecuteTool] JSON 解析失败，使用原始日志作为 execution_log，" +
+      "err=" + e.message?.slice(0, 150) +
+      ", raw_len=" + rawResult.length +
+      ", raw_head=" + rawResult.slice(0, 120).replace(/\n/g, "\\n")
+    );
+    return { executionLog: rawResult, toolCalls: [] };
+  }
+}
+
+/**
+ * 从 ExecuteTool 返回的 JSON 中提取文档片段（sdk_get_text 的结果）
+ *
+ * @param rawResult - ExecuteTool 返回的原始字符串
+ * @param maxLength - 最大返回长度（默认 4000）
+ * @returns 提取到的文档文本片段
+ */
+export function extractDocSnippet(rawResult: string, maxLength: number = 4000): string {
+  try {
+    const parsed = JSON.parse(rawResult);
+    if (parsed.tool_calls && Array.isArray(parsed.tool_calls)) {
+      for (const tc of parsed.tool_calls) {
+        if (tc.tool === "sdk_get_text" && tc.result) {
+          const textMatch = tc.result.match(/：(.+)/);
+          const snippet = textMatch ? textMatch[1] : tc.result;
+          return snippet.length > maxLength
+            ? snippet.substring(0, maxLength) + "...(已截断)"
+            : snippet;
+        }
+      }
+    }
+  } catch {
+    // 提取失败，返回空字符串
+  }
+  return "";
 }

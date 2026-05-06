@@ -13,14 +13,18 @@ export type { PlanOutput, PlanTask } from "./planTool";
 
 export { ExecuteTool } from "./executeTool";
 export type { ExecuteResult } from "./executeTool";
+export { parseExecuteResult, extractDocSnippet } from "./executeTool";
 
 export { ValidateTool } from "./validateTool";
 export type { ValidateOutput } from "./validateTool";
 
+// SDK 工具 + metadata（改进项 4）
 export {
   SDKFindTextTool,
   SDKReplaceTextTool,
   SDKReplaceAllTool,
   SDKGetTextTool,
   SDKSaveTool,
+  getToolMetadata,
 } from "./sdkTools";
+export type { SDKToolMetadata } from "./sdkTools";

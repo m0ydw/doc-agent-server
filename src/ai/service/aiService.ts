@@ -21,14 +21,14 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
   });
 
   try {
-    var body = req.body;
-    var message = body.message;
-    var contextDocId = body.contextDocId;
-    var mode: "workflow" | "chat" = (body.mode === "chat" ? "chat" : "workflow");
-    var modelConfig = body.modelConfig as { provider?: string; apiKey?: string; model?: string; modelKwargs?: Record<string, any> } | undefined;
+    const body = req.body;
+    const message = body.message;
+    const contextDocId = body.contextDocId;
+    const mode: "workflow" | "chat" = (body.mode === "chat" ? "chat" : "workflow");
+    const modelConfig = body.modelConfig as { provider?: string; apiKey?: string; model?: string; modelKwargs?: Record<string, any> } | undefined;
 
     // 映射前端字段到 GlobalAgentConfig
-    var agentConfig = modelConfig ? {
+    const agentConfig = modelConfig ? {
       provider: modelConfig.provider as any,
       apiKey: modelConfig.apiKey,
       modelName: modelConfig.model,
@@ -41,7 +41,7 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    var agent = getGlobalAgent();
+    const agent = getGlobalAgent();
 
     if (!agent.isInitialized) {
       agent.initialize(agentConfig);
@@ -55,13 +55,13 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
       agent.reinitialize(agentConfig);
     }
 
-    var stream = agent.streamProcess({
+    const stream = agent.streamProcess({
       message: message,
       contextDocId: contextDocId,
       mode: mode,
     });
 
-    for await (var chunk of stream) {
+    for await (const chunk of stream) {
       if (res.writableEnded) break;
       res.write(chunk);
     }
@@ -83,8 +83,8 @@ async function runAgentMessage(req: Request, res: Response): Promise<void> {
  * GET /api/ai/agent/status
  */
 function getAgentStatus(req: Request, res: Response): void {
-  var agent = getGlobalAgent();
-  var status = agent.getStatus();
+  const agent = getGlobalAgent();
+  const status = agent.getStatus();
   res.json({
     success: true,
     data: {
@@ -100,7 +100,7 @@ function getAgentStatus(req: Request, res: Response): void {
  * POST /api/ai/agent/reset
  */
 function resetAgent(req: Request, res: Response): void {
-  var agent = getGlobalAgent();
+  const agent = getGlobalAgent();
   agent.reset();
   res.json({
     success: true,
@@ -114,18 +114,18 @@ function resetAgent(req: Request, res: Response): void {
  */
 function setAgentConfig(req: Request, res: Response): void {
   try {
-    var body = req.body;
-    var provider = body.provider;
-    var apiKey = body.apiKey;
-    var model = body.model;
-    var modelKwargs = body.modelKwargs;
+    const body = req.body;
+    const provider = body.provider;
+    const apiKey = body.apiKey;
+    const model = body.model;
+    const modelKwargs = body.modelKwargs;
 
     if (!provider) {
       res.status(400).json({ success: false, error: "provider 不能为空" });
       return;
     }
 
-    var agent = getGlobalAgent();
+    const agent = getGlobalAgent();
     agent.reinitialize({
       provider: provider as any,
       apiKey: apiKey || undefined,

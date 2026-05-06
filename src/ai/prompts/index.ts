@@ -10,10 +10,29 @@
 export { ANTI_LEAK_RULES, CLASSIFICATION_RULES, EXECUTION_STYLE_RULES, LANGUAGE_RULES } from "./shared/rules";
 export { CLASSIFICATION_EXAMPLES, EXECUTION_STYLE_EXAMPLES } from "./shared/examples";
 
-// 各阶段模板
-export { analyzeThoughtPrompt, analyzeToolPrompt } from "./analyze";
-export { planThoughtPrompt, planToolPrompt } from "./plan";
+// 各阶段模板 + 工厂函数（改进项 7）
+export {
+  analyzeThoughtPrompt,
+  analyzeToolPrompt,
+  buildAnalyzePhase,
+} from "./analyze";
+export type { AnalyzePhaseParams } from "./analyze";
+
+export {
+  planThoughtPrompt,
+  planToolPrompt,
+  buildPlanPhase,
+} from "./plan";
+export type { PlanPhaseParams } from "./plan";
+
 export { executeSystemPrompt, buildToolList } from "./execute";
-export { validateThoughtPrompt, validateToolPrompt } from "./validate";
+
+export {
+  validateThoughtPrompt,
+  validateToolPrompt,
+  buildValidatePhase,
+} from "./validate";
+export type { ValidatePhaseParams } from "./validate";
+
 export { generateSystemPrompt } from "./generate";
 export { chatSystemPrompt } from "./chat";
