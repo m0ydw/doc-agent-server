@@ -71,16 +71,16 @@ export async function buildPlanPhase(
     doc_snippet = "",
   } = params;
 
-  // 构建 tool 阶段的上下文
+  // 构建 tool 阶段的上下文（doc_snippet 由调用方已截断）
   const toolContext = `## 分析结果\n${clean_analysis}\n\n## 当前可用文档\n${doc_context}` +
-    (doc_snippet ? `\n\n## 已有文档内容片段\n${doc_snippet.substring(0, 2000)}` : "");
+    (doc_snippet ? `\n\n## 已有文档内容片段\n${doc_snippet}` : "");
 
   // 构建 thought 消息列表
   const thoughtMessages = await planThoughtPrompt.formatMessages({
     anti_leak_rules,
     clean_analysis,
     doc_context,
-    doc_snippet: doc_snippet ? doc_snippet.substring(0, 2000) : "",
+    doc_snippet: doc_snippet || "",
   });
 
   // 构建 tool system message

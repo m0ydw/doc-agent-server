@@ -45,14 +45,6 @@ export function sse(type: SseEventType, data: unknown): string {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-/**
- * 快捷方式：生成 SSE 帧并 append "\n"（保持与旧 yield 格式的兼容）
- * @deprecated 使用 sse() 即可，SSE 标准不需要额外换行
- */
-export function sseLine(type: SseEventType, data: unknown): string {
-  return sse(type, data);
-}
-
 // ================================================================
 // 3. 语义化快捷方式（提高可读性）
 // ================================================================

@@ -19,10 +19,16 @@ app.use("/api/doc-operations", docOperationsRoutes);
 const PORT = config.PORT;
 
 // 启动 HTTP 服务
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log("Node 后端已启动");
   console.log(`地址：http://localhost:${PORT}`);
+  console.log(`Agent WS：ws://localhost:${PORT}/ws/agent`);
 });
+
+// ===== Agent WebSocket Server（替代 HTTP SSE）=====
+
+import { attachAgentWs } from "./ai/core/wsAgentHandler";
+attachAgentWs(server);
 
 // ===== SuperDoc Yjs Collaboration Server =====
 

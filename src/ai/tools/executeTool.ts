@@ -55,9 +55,10 @@ import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
-import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKSaveTool } from "./sdkTools";
+import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKSaveTool, SDKTaskCompleteTool } from "./sdkTools";
 import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
 import { extractAndParseJson } from "../core/jsonExtractor";
+import { logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
 
 /** ExecuteTool 的输入参数 schema */
 const ExecuteInputSchema = z.object({
@@ -69,6 +70,12 @@ const ExecuteInputSchema = z.object({
 
 /** 最大 tool calling 轮数，防止无限循环 */
 const MAX_TOOL_ROUNDS = 30;
+
+/** 日志中错误消息最大长度 */
+const ERROR_MSG_MAX_LEN = 150;
+
+/** 日志中原始结果预览最大长度 */
+const RAW_RESULT_HEAD_LEN = 120;
 
 /** 单次工具调用记录 */
 export interface ToolCallRecord {
@@ -92,6 +99,21 @@ export interface ExecuteResult {
   task_status: Record<string, "success" | "failed" | "skipped">;
   /** 是否完全成功 */
   success: boolean;
+}
+
+// ================================================================
+// 流式执行事件类型（异步生成器模式，替代批量返回）
+// ================================================================
+
+/** 执行流中的单个事件 */
+export interface ExecuteToolEvent {
+  type: "tool_start" | "tool_result" | "done";
+  tool?: string;
+  args?: string;
+  result?: string;
+  status?: "success" | "failed";
+  executionLog?: string;
+  success?: boolean;
 }
 
 // ================================================================
@@ -122,10 +144,6 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
   schema = ExecuteInputSchema;
 
   private llm: ChatOpenAI;
-  /** 当前文档 ID，传给 SDK 工具 */
-  private docId: string = "";
-  /** 缓存的 SDK 工具列表 */
-  private sdkTools: StructuredTool[] = [];
 
   constructor(llm: ChatOpenAI) {
     super();
@@ -151,16 +169,12 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
    *   效果等价，但日志记录更精确。
    */
   async _call(input: z.infer<typeof ExecuteInputSchema>): Promise<string> {
-    this.docId = input.docId;
-
-    // 解析任务清单（支持 JSON 和纯文本描述两种格式）
-    let tasks: any[] = [];
-    let planDescription = input.plan_tasks; // 保留原始文本，供降级使用
+    const docId = input.docId;
+    let planTasks: any[] = [];
     try {
       const planOutput = JSON.parse(input.plan_tasks);
-      tasks = planOutput.tasks || [];
+      planTasks = planOutput.tasks || [];
     } catch {
-      // JSON 解析失败 → 降级：使用括号计数的安全提取（替代贪婪正则 /\{[\s\S]*\}/）
       console.warn(
         "[ExecuteTool] plan_tasks JSON 解析失败，尝试降级处理，" +
         "plan_len=" + (input.plan_tasks || "").length +
@@ -168,139 +182,35 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
       );
       const extracted = extractAndParseJson(input.plan_tasks);
       if (extracted) {
-        tasks = (extracted as any).tasks || [];
-        if (tasks.length > 0) {
-          console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + tasks.length);
+        planTasks = (extracted as any).tasks || [];
+        if (planTasks.length > 0) {
+          console.log("[ExecuteTool] 从原始文本中成功提取 JSON，tasks=" + planTasks.length);
         }
       }
     }
 
-    if (tasks.length === 0) {
-      return JSON.stringify({
-        execution_log: "[Execute] 没有需要执行的任务",
-        task_status: {},
-        success: true,
-      } as ExecuteResult);
-    }
-
-    // 初始化 SDK 工具（注入 docId）
-    this.sdkTools = this.createSDKTools();
-
-    // 将 LLM 与工具绑定，使其具备 tool calling 能力
-    const llmWithTools = this.llm.bindTools(this.sdkTools);
-
-    // 构建消息列表
-    const systemMsg = await buildExecuteSystemMessage();
-    const messages: any[] = [
-      systemMsg,
-      new HumanMessage(
-        `请按以下任务清单操作文档（文档ID: ${this.docId}）：\n\n` +
-        JSON.stringify(tasks, null, 2) +
-        `\n\n请逐个执行任务，每完成一步告诉我结果。所有任务完成后调用 sdk_save。`
-      ),
-    ];
-
+    // 委托给流式执行器，收集所有事件
     const log: string[] = [];
     const toolCalls: ToolCallRecord[] = [];
     let taskStatus: Record<string, "success" | "failed" | "skipped"> = {};
-    let consecutiveNoToolCall = 0;  // 连续无工具调用计数器
+    let success = false;
 
-    // tool calling 循环
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await llmWithTools.invoke(messages);
-      messages.push(response);
-
-      // 有 tool call：重置计数器
-      consecutiveNoToolCall = 0;
-
-      // 检查是否有 tool calls
-      if (response.tool_calls && response.tool_calls.length > 0) {
-        for (const tc of response.tool_calls) {
-          const toolName = tc.name;
-          const toolArgs = tc.args;
-          const toolId = tc.id;
-
-          // 查找对应的工具并执行
-          const tool = this.sdkTools.find(t => t.name === toolName);
-          if (!tool) {
-            log.push(`[Execute] 未知工具: ${toolName}`);
-            continue;
-          }
-
-          try {
-            const result = await tool.invoke(toolArgs);
-            const resultStr = typeof result === "string" ? result : JSON.stringify(result);
-            log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${resultStr.slice(0, 200)}`);
-
-            // 记录结构化工具调用（保存操作除外——SDK 自动同步）
-            if (toolName !== "sdk_save") {
-              toolCalls.push({
-                tool: toolName,
-                args: JSON.stringify(toolArgs),
-                result: resultStr.slice(0, 300),
-                status: "success",
-              });
-            }
-
-            // 记录任务状态：如果是 sdk_replace_text 或 sdk_replace_all，标记对应任务
-            if (toolName === "sdk_replace_text" || toolName === "sdk_replace_all") {
-              const taskMatch = response.content?.toString().match(/任务[：:]\s*([^\n]+)/);
-              if (taskMatch) {
-                taskStatus[taskMatch[1]] = "success";
-              }
-            }
-
-            // 将工具执行结果返回给 LLM
-            messages.push(new ToolMessage({
-              content: resultStr,
-              tool_call_id: toolId!,
-            }));
-          } catch (err: any) {
-            const errMsg = `[工具] ${toolName} 执行失败: ${err.message}`;
-            log.push(errMsg);
-            toolCalls.push({
-              tool: toolName,
-              args: JSON.stringify(toolArgs),
-              result: err.message,
-              status: "failed",
-            });
-            messages.push(new ToolMessage({
-              content: `操作失败: ${err.message}`,
-              tool_call_id: toolId!,
-            }));
-          }
+    for await (const event of executeTasksStream(this.llm, docId, planTasks)) {
+      if (event.type === "tool_start" || event.type === "tool_result") {
+        // 收集工具调用记录（保持 _call 返回 JSON 的兼容性）
+        if (event.type === "tool_result" && event.tool !== "sdk_save") {
+          toolCalls.push({
+            tool: event.tool!,
+            args: "", // 从 tool_start 已获取，简化处理
+            result: event.result || "",
+            status: event.status || "success",
+          });
         }
-      } else {
-        // LLM 没有调用工具：计数器 +1
-        consecutiveNoToolCall++;
-        const content = response.content?.toString() || "";
-        log.push(`[LLM] (第${consecutiveNoToolCall}轮无工具调用) ${content.slice(0, 300)}`);
-
-        // 连续2轮无工具调用 → 认为执行完成（替代字符串匹配 "完成"/"保存"）
-        if (consecutiveNoToolCall >= 2) {
-          log.push(`[Execute] LLM 连续${consecutiveNoToolCall}轮无工具调用，自动终止`);
-          break;
-        }
-        // 接近最大轮数时也终止（安全兜底）
-        if (round > MAX_TOOL_ROUNDS - 3) {
-          log.push(`[Execute] 达到最大轮数，强制终止`);
-          break;
-        }
+      } else if (event.type === "done") {
+        if (event.executionLog) log.push(event.executionLog);
+        success = event.success ?? false;
       }
     }
-
-    // 确保保存
-    try {
-      const saveTool = this.sdkTools.find(t => t.name === "sdk_save");
-      if (saveTool) {
-        await saveTool.invoke({});
-        log.push(`[Execute] 文档已保存`);
-      }
-    } catch {
-      log.push(`[Execute] 保存失败（可能已在协作中自动保存）`);
-    }
-
-    const success = Object.values(taskStatus).every(s => s === "success") && tasks.length > 0;
 
     const result: ExecuteResult = {
       execution_log: log.join("\n"),
@@ -311,20 +221,188 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
 
     return JSON.stringify(result);
   }
+}
 
-  /**
-   * 创建 SDK 工具实例列表
-   * 每个工具都绑定 docId，LLM 通过 tool calling 调用它们
-   */
-  private createSDKTools(): StructuredTool[] {
-    return [
-      new SDKFindTextTool(this.docId),
-      new SDKReplaceTextTool(this.docId),
-      new SDKReplaceAllTool(this.docId),
-      new SDKGetTextTool(this.docId),
-      new SDKSaveTool(this.docId),
-    ];
+// ================================================================
+// executeTasksStream — 流式工具执行（异步生成器模式）
+// ================================================================
+
+/**
+ * 流式执行文档操作任务，逐个 yield 工具调用事件
+ *
+ * 【为什么不用 ExecuteTool.invoke() 等 Promise 返回？】
+ *   invoke() 是一个同步屏障 — 它在内部完成所有工具调用后才返回 JSON。
+ *   前端在此期间收不到任何事件，最终看到的是"批量化一次性渲染"。
+ *
+ *   本函数将 tool calling 循环改为 AsyncGenerator，在每个工具
+ *   执行前 yield tool_start，执行后 yield tool_result，
+ *   使得前端可以实时渲染工具标签（loading → done/error）。
+ *
+ * @param llm       LLM 实例
+ * @param docId     目标文档 ID
+ * @param planTasks Plan 阶段的任务数组
+ * @yields ExecuteToolEvent — 逐工具流式事件
+ */
+export async function* executeTasksStream(
+  llm: ChatOpenAI,
+  docId: string,
+  planTasks: any[]
+): AsyncGenerator<ExecuteToolEvent, void, unknown> {
+  if (planTasks.length === 0) {
+    yield { type: "done", executionLog: "[Execute] 没有需要执行的任务", success: true };
+    return;
   }
+
+  // 初始化 SDK 工具
+  const sdkTools: StructuredTool[] = [
+    new SDKFindTextTool(docId),
+    new SDKReplaceTextTool(docId),
+    new SDKReplaceAllTool(docId),
+    new SDKGetTextTool(docId),
+    new SDKSaveTool(docId),
+    new SDKTaskCompleteTool(),
+  ];
+
+  const llmWithTools = llm.bindTools(sdkTools);
+
+  const systemMsg = await buildExecuteSystemMessage();
+  const messages: any[] = [
+    systemMsg,
+    new HumanMessage(
+      `请按以下任务清单操作文档（文档ID: ${docId}）：\n\n` +
+      JSON.stringify(planTasks, null, 2) +
+      `\n\n请逐个执行任务，每完成一步告诉我结果。所有任务完成后调用 sdk_save。`
+    ),
+  ];
+
+  const log: string[] = [];
+  const toolCalls: ToolCallRecord[] = [];
+  let taskStatus: Record<string, "success" | "failed" | "skipped"> = {};
+
+  // tool calling 循环
+  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    const endInvokeLog = logLlmInvokeStart(`ExecuteTool.round${round + 1}`);
+    const response = await llmWithTools.invoke(messages);
+    logLlmInvokeResult(`ExecuteTool.round${round + 1}`, response.content?.toString() || null, response.tool_calls);
+    endInvokeLog?.();
+    messages.push(response);
+
+    if (response.tool_calls && response.tool_calls.length > 0) {
+      let shouldBreak = false;
+      for (const tc of response.tool_calls) {
+        const toolName = tc.name;
+
+        // task_complete: LLM 显式声明完成 → 立即终止
+        if (toolName === "task_complete") {
+          log.push("[Execute] LLM 调用 task_complete，执行结束");
+          shouldBreak = true;
+          break;
+        }
+
+        const toolArgs = tc.args;
+        const toolId = tc.id;
+
+        const tool = sdkTools.find(t => t.name === toolName);
+        if (!tool) {
+          log.push(`[Execute] 未知工具: ${toolName}`);
+          continue;
+        }
+
+        // ★ yield tool_start 事件（前端立即渲染 loading 标签）
+        yield {
+          type: "tool_start",
+          tool: toolName,
+          args: JSON.stringify(toolArgs),
+        };
+
+        try {
+          const result = await tool.invoke(toolArgs);
+          const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+          log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${resultStr.slice(0, 200)}`);
+
+          if (toolName !== "sdk_save") {
+            toolCalls.push({
+              tool: toolName,
+              args: JSON.stringify(toolArgs),
+              result: resultStr.slice(0, 300),
+              status: "success",
+            });
+          }
+
+          // ★ yield tool_result 事件（前端更新标签为 done/error）
+          yield {
+            type: "tool_result",
+            tool: toolName,
+            result: resultStr,
+            status: "success",
+          };
+
+          if (toolName === "sdk_replace_text" || toolName === "sdk_replace_all") {
+            const taskMatch = response.content?.toString().match(/任务[：:]\s*([^\n]+)/);
+            if (taskMatch) {
+              taskStatus[taskMatch[1]] = "success";
+            }
+          }
+
+          messages.push(new ToolMessage({
+            content: resultStr,
+            tool_call_id: toolId!,
+          }));
+        } catch (err: any) {
+          const errMsg = `[工具] ${toolName} 执行失败: ${err.message}`;
+          log.push(errMsg);
+          toolCalls.push({
+            tool: toolName,
+            args: JSON.stringify(toolArgs),
+            result: err.message,
+            status: "failed",
+          });
+
+          yield {
+            type: "tool_result",
+            tool: toolName,
+            result: err.message,
+            status: "failed",
+          };
+
+          messages.push(new ToolMessage({
+            content: `操作失败: ${err.message}`,
+            tool_call_id: toolId!,
+          }));
+        }
+      }
+      if (shouldBreak) break;
+    } else {
+      // LLM 没有调用工具 → 可能是思考中，继续
+      const content = response.content?.toString() || "";
+      log.push(`[LLM] (无工具调用) ${content.slice(0, 300)}`);
+      // 接近最大轮数时终止（安全兜底）
+      if (round > MAX_TOOL_ROUNDS - 3) {
+        log.push(`[Execute] 达到最大轮数，强制终止`);
+        break;
+      }
+    }
+  }
+
+  // 确保保存
+  try {
+    const saveTool = sdkTools.find(t => t.name === "sdk_save");
+    if (saveTool) {
+      await saveTool.invoke({});
+      log.push(`[Execute] 文档已保存`);
+    }
+  } catch {
+    log.push(`[Execute] 保存失败（可能已在协作中自动保存）`);
+  }
+
+  const success = Object.values(taskStatus).every(s => s === "success") && planTasks.length > 0;
+
+  // ★ yield done 事件（携带执行日志和成功状态）
+  yield {
+    type: "done",
+    executionLog: log.join("\n"),
+    success,
+  };
 }
 
 // ================================================================
@@ -350,9 +428,9 @@ export function parseExecuteResult(
   } catch (e: any) {
     console.warn(
       "[ExecuteTool] JSON 解析失败，使用原始日志作为 execution_log，" +
-      "err=" + e.message?.slice(0, 150) +
+      "err=" + e.message?.slice(0, ERROR_MSG_MAX_LEN) +
       ", raw_len=" + rawResult.length +
-      ", raw_head=" + rawResult.slice(0, 120).replace(/\n/g, "\\n")
+      ", raw_head=" + rawResult.slice(0, RAW_RESULT_HEAD_LEN).replace(/\n/g, "\\n")
     );
     return { executionLog: rawResult, toolCalls: [], success: null };
   }

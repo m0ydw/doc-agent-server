@@ -39,6 +39,9 @@ import { z } from "zod";
 import * as editor from "../../services/editor";
 import * as sessionManager from "../../services/session";
 
+/** SDK 读取文档时返回给 LLM 的最大字符数 */
+const SDK_GET_TEXT_MAX_CHARS = 2000;
+
 // ================================================================
 // 工具 metadata 类型（改进项 4）
 // ================================================================
@@ -297,9 +300,9 @@ export class SDKGetTextTool extends StructuredTool {
         return "文档内容为空";
       }
 
-      // 截取前 2000 字符，避免 LLM 上下文过长
-      const excerpt = text.length > 2000
-        ? text.slice(0, 2000) + `\n\n...（共 ${text.length} 字符，仅显示前 2000）`
+      // 截取前 SDK_GET_TEXT_MAX_CHARS 字符，避免 LLM 上下文过长
+      const excerpt = text.length > SDK_GET_TEXT_MAX_CHARS
+        ? text.slice(0, SDK_GET_TEXT_MAX_CHARS) + `\n\n...（共 ${text.length} 字符，仅显示前 ${SDK_GET_TEXT_MAX_CHARS}）`
         : text;
 
       return `文档全文（${text.length} 字符）：\n\n${excerpt}`;
@@ -359,22 +362,62 @@ export class SDKSaveTool extends StructuredTool {
 }
 
 // ================================================================
-// 统一 metadata 映射表（单一数据源，改进项 #7）
+// 6. task_complete — 执行完成信号（LLM 主动声明确认结束）
 // ================================================================
 
 /**
- * 工具名 → metadata 的单一映射表
- * 替代 globalAgent.ts、ToolCallBlock.tsx、AssistantCard.tsx 中的多套硬编码映射。
+ * task_complete — 终结工具
  *
- * 用法：
- *   const meta = SDK_TOOL_METADATA[toolName];
- *   console.log(meta.displayName);  // "搜索文本"
- *   console.log(meta.showInUI);     // true
+ * LLM 在所有任务执行完成后主动调用此工具，显式声明"我完成了"。
+ * 替代之前的 consecutiveNoToolCall 被动计数器。
+ *
+ * 【标准性】
+ *   这是 LangChain AgentExecutor / OpenAI Swarm 的标准模式。
  */
+export class SDKTaskCompleteTool extends StructuredTool {
+  name = "task_complete";
+  description = "★★★ 所有任务执行完成后必须调用此工具！调用后执行将立即结束。";
+
+  static metadata: SDKToolMetadata = {
+    displayName: "执行完成",
+    argsFormatter: () => "任务执行完毕",
+    showInUI: false,
+  };
+
+  schema = z.object({
+    summary: z.string().optional().describe("执行结果的简要总结"),
+  });
+
+  async _call(input: z.infer<typeof this.schema>): Promise<string> {
+    return `执行完成${input.summary ? "：" + input.summary : ""}`;
+  }
+}
+
+// ================================================================
+// 统一 metadata 映射表（单一数据源，改进项 #7）
+// ================================================================
+
 export const SDK_TOOL_METADATA: Record<string, SDKToolMetadata> = {
   [new SDKFindTextTool("").name]:    SDKFindTextTool.metadata,
   [new SDKReplaceTextTool("").name]: SDKReplaceTextTool.metadata,
   [new SDKReplaceAllTool("").name]:  SDKReplaceAllTool.metadata,
   [new SDKGetTextTool("").name]:     SDKGetTextTool.metadata,
   [new SDKSaveTool("").name]:        SDKSaveTool.metadata,
+  [new SDKTaskCompleteTool().name]:  SDKTaskCompleteTool.metadata,
 };
+
+/**
+ * 根据工具名安全获取 metadata（统一 fallback 逻辑）
+ * 替代 globalAgent.ts 中的内联 `|| { ... }` 回退
+ */
+export function getToolMetadataByName(toolName: string): SDKToolMetadata {
+  const meta = SDK_TOOL_METADATA[toolName];
+  if (meta) return meta;
+
+  console.warn("[sdkTools] 未注册的工具名: " + toolName);
+  return {
+    displayName: toolName,
+    argsFormatter: () => "",
+    showInUI: true,
+  };
+}

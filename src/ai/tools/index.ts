@@ -12,8 +12,8 @@ export { PlanTool } from "./planTool";
 export type { PlanOutput, PlanTask } from "./planTool";
 
 export { ExecuteTool } from "./executeTool";
-export type { ExecuteResult } from "./executeTool";
-export { parseExecuteResult, extractDocSnippet } from "./executeTool";
+export type { ExecuteResult, ExecuteToolEvent } from "./executeTool";
+export { executeTasksStream, parseExecuteResult, extractDocSnippet } from "./executeTool";
 
 export { ValidateTool } from "./validateTool";
 export type { ValidateOutput } from "./validateTool";
@@ -25,7 +25,9 @@ export {
   SDKReplaceAllTool,
   SDKGetTextTool,
   SDKSaveTool,
+  SDKTaskCompleteTool,
   getToolMetadata,
   SDK_TOOL_METADATA,
+  getToolMetadataByName,
 } from "./sdkTools";
 export type { SDKToolMetadata } from "./sdkTools";

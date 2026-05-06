@@ -25,6 +25,7 @@ import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messag
 import { StructuredTool } from "@langchain/core/tools";
 import { extractJson } from "../core/jsonExtractor";
 import { sseThought, sseWarning } from "../core/sseEmitter";
+import { logLlmStreamStart, logLlmStreamFull, logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
 
 // ================================================================
 // 流式切割常量（消除魔法数字，改进项 #6）
@@ -56,11 +57,16 @@ export const STREAM_CUT_WINDOW = 64;
  */
 export async function* streamWithCutting(
   stream: AsyncIterable<{ content: { toString(): string } }>,
-  emit: (content: string) => string
+  emit: (content: string) => string,
+  debugLabel?: string
 ): AsyncGenerator<string, void, unknown> {
+  const endLog = debugLabel ? logLlmStreamStart(debugLabel) : undefined;
+  let fullText = "";
   let buffer = "";
   for await (const chunk of stream) {
-    buffer += chunk.content.toString();
+    const text = chunk.content.toString();
+    fullText += text;
+    buffer += text;
     if (buffer.length >= STREAM_CHUNK_SIZE) {
       const cutIdx = Math.max(
         buffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
@@ -74,6 +80,10 @@ export async function* streamWithCutting(
   }
   if (buffer) {
     yield emit(buffer);
+  }
+  if (debugLabel) {
+    logLlmStreamFull(debugLabel, fullText);
+    endLog?.();
   }
 }
 
@@ -96,7 +106,7 @@ export interface PhaseStreamStrategy {
    * @param outputTool - 结构化输出工具
    * @param toolSystemMessage - 工具调用阶段的 system prompt
    * @param toolContext - 工具调用阶段的上下文
-   * @yields [thought]xxx\n — 逐片流式思考文本
+   * @yields 标准 SSE thought 事件（event: thought\ndata: {"content":"..."}\n\n）
    * @returns 结构化数据对象，失败时为 null
    */
   execute(
@@ -135,7 +145,20 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     // ===== 第1次：流式输出 thought =====
     let stream: AsyncIterable<any>;
     try {
+      const endStreamLog = logLlmStreamStart("DualCall.thought (流式)");
       stream = await llm.stream(thoughtMessages);
+      // 标记 stream 已创建，在 done 时输出全文
+      let thoughtFull = "";
+      const originalStream = stream;
+      // 包装 stream 以累积全文（用于 debug 日志）
+      stream = (async function*() {
+        for await (const chunk of originalStream) {
+          thoughtFull += chunk.content.toString();
+          yield chunk;
+        }
+        logLlmStreamFull("DualCall.thought", thoughtFull);
+        endStreamLog?.();
+      })();
     } catch (e: any) {
       yield* emitWarning(`思考流启动失败：${e.message?.slice(0, 200)}`);
       return null;
@@ -144,19 +167,19 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     let buffer = "";
     for await (const chunk of stream) {
       buffer += chunk.content.toString().replace(/\n/g, " ");
-      // 自然断句：按 THOUGHT_CHUNK_SIZE 切割，保留超出部分（修复 #10 buffer 覆盖 bug）
       while (buffer.length >= THOUGHT_CHUNK_SIZE) {
         const line = buffer.slice(0, THOUGHT_CHUNK_SIZE).trim();
-        if (line) yield "[thought]" + line + "\n";
-        buffer = buffer.slice(THOUGHT_CHUNK_SIZE);  // 保留剩余，而非 buffer = ""
+        if (line) yield sseThought(line);
+        buffer = buffer.slice(THOUGHT_CHUNK_SIZE);
       }
     }
     if (buffer.trim()) {
-      yield "[thought]" + buffer.trim() + "\n";
+      yield sseThought(buffer.trim());
     }
 
     // ===== 第2次：tool calling 获取结构化数据 =====
     console.log("[phaseStrategy:" + this.name + "] 开始 tool calling, tool=" + outputTool.name);
+    const endInvokeLog = logLlmInvokeStart("DualCall.bindTools (结构化)");
     try {
       const llmWithTools = llm.bindTools([outputTool]);
       const response = await llmWithTools.invoke([
@@ -165,6 +188,9 @@ export class DualCallStrategy implements PhaseStreamStrategy {
       ]);
 
       const toolCalls = response.tool_calls;
+      logLlmInvokeResult("DualCall.bindTools", response.content?.toString() || null, toolCalls);
+      endInvokeLog?.();
+
       if (toolCalls && toolCalls.length > 0) {
         const args = toolCalls[0].args;
         console.log("[phaseStrategy:" + this.name + "] Tool calling 成功, keys=" +
@@ -175,6 +201,7 @@ export class DualCallStrategy implements PhaseStreamStrategy {
       yield* emitWarning("Tool calling: LLM 未调用工具，返回 null");
       return null;
     } catch (e: any) {
+      endInvokeLog?.();
       yield* emitWarning(`结构化输出请求失败：${e.message?.slice(0, 200)}`);
       return null;
     }
@@ -188,16 +215,13 @@ export class DualCallStrategy implements PhaseStreamStrategy {
 /**
  * SingleCallSeparatorStrategy — 单次 LLM 调用 + 分隔符分离策略
  *
+ * @deprecated 此策略无法传递 Zod schema，LLM 可能输出错误的 JSON 结构。
+ *             请使用 DualCallStrategy（标准 bindTools API）。
+ *             仅通过环境变量 PHASE_STRATEGY=singleCall 实验性启用。
+ *
  * 原理：
  *   在同一个流式响应中，LLM 先输出思考，然后输出 "---JSON---" 分隔符，
  *   再输出纯 JSON。前端同时消费思考流式事件，后端解析 JSON。
- *
- * 优点：单次请求，延迟和 token 消耗减半
- * 缺点：依赖 LLM 遵循分隔符约定（非标准化行为，部分模型可能不遵守）
- *
- * 消费方式（与 DualCallStrategy 完全一致）：
- *   - 逐片 yield [thought] 事件 → 前端实时渲染
- *   - 流末尾返回 parsed JSON 对象 → 后端阶段逻辑使用
  */
 export class SingleCallSeparatorStrategy implements PhaseStreamStrategy {
   readonly name = "singleCallSeparator";

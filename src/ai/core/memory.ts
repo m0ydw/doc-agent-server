@@ -131,10 +131,10 @@ export class DocAgentMemory extends BaseMemory {
 
     const errorMessage = this.extractErrorMessage(executionLog, result);
 
-    // 替换同一需求的旧记录
+    // 替换同一需求的旧记录（精确匹配，替代中文关键词推断）
     this.memories = this.memories.filter((mem) => {
       if (mem.docPath !== docPath || mem.userInput !== userInput) return true;
-      if (result.includes("成功")) return false; // 新的成功记录覆盖旧的
+      if (result === "成功") return false; // 新的成功记录覆盖旧的
       return false; // 新的失败记录覆盖旧的
     });
 
@@ -219,7 +219,7 @@ export class DocAgentMemory extends BaseMemory {
         `任务清单: ${mem.plan.tasks.map((t: any) => t.goal || t.action).join(", ")}`
       );
     }
-    if (mem.result.includes("成功") && mem.plan?.tasks) {
+    if (mem.result === "成功" && mem.plan?.tasks) {
       lines.push(`有效方案: ${JSON.stringify(mem.plan.tasks)}`);
     }
 
@@ -230,23 +230,22 @@ export class DocAgentMemory extends BaseMemory {
    * 从执行日志中提取错误信息
    */
   private extractErrorMessage(executionLog: string, result: string): string {
-    const lines = executionLog.split("\n");
-    const errors: string[] = [];
-
-    for (const line of lines) {
-      if (line.includes("失败") && line.includes("[工具]")) {
-        errors.push(line.replace("[工具]", "").trim());
-      }
-    }
-
-    if (errors.length > 0) return errors.join("; ");
-
-    if (result.includes("失败")) {
+    // 从结构化失败步骤中提取错误信息（不再依赖旧格式 [工具] 标记）
+    if (result === "失败") {
       const match = result.match(/原因[：:](.+)/);
       if (match) return match[1].trim();
     }
 
-    return "";
+    // 降级：从执行日志中提取包含"失败"的行
+    const lines = executionLog.split("\n");
+    const errors: string[] = [];
+    for (const line of lines) {
+      if (line.includes("失败")) {
+        errors.push(line.trim());
+      }
+    }
+
+    return errors.length > 0 ? errors.join("; ") : "";
   }
 }
 
@@ -300,7 +299,7 @@ function formatEntry(mem: MemoryEntry): string {
   if (mem.plan?.tasks?.length > 0) {
     lines.push(`任务清单: ${mem.plan.tasks.map((t: any) => t.goal || t.action).join(", ")}`);
   }
-  if (mem.result.includes("成功") && mem.plan?.tasks) {
+  if (mem.result === "成功" && mem.plan?.tasks) {
     lines.push(`有效方案: ${JSON.stringify(mem.plan.tasks)}`);
   }
   return lines.join("\n");
@@ -320,7 +319,11 @@ export function manageMemory(
   executionLog: string = "",
   failedSteps: string[] = []
 ): void {
-  const errorMessage = extractErrorMessageSimple(executionLog, result);
+  // 从执行日志中提取错误信息
+  const errorLogLines = executionLog.split("\n").filter(l => l.includes("失败"));
+  const errorMessage = errorLogLines.length > 0
+    ? errorLogLines.map(l => l.trim()).join("; ")
+    : (result === "失败" ? "执行失败" : "");
 
   // 直接操作内部数组（同步 API）
   const mem = globalMemory as any;
@@ -350,22 +353,6 @@ export function manageMemory(
   mem.memories = memories;
 
   console.log("[记忆管理] 已记录:", result.substring(0, 50), "| 错误:", errorMessage?.substring(0, 30) || "无");
-}
-
-function extractErrorMessageSimple(executionLog: string, result: string): string {
-  const lines = executionLog.split("\n");
-  const errors: string[] = [];
-  for (const line of lines) {
-    if (line.includes("失败") && line.includes("[工具]")) {
-      errors.push(line.replace("[工具]", "").trim());
-    }
-  }
-  if (errors.length > 0) return errors.join("; ");
-  if (result.includes("失败")) {
-    const match = result.match(/原因[：:](.+)/);
-    if (match) return match[1].trim();
-  }
-  return "";
 }
 
 /**

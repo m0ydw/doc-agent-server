@@ -1,260 +1,225 @@
 /**
  * ================================================================
- * 工作流节点函数
+ * LangGraph 工作流节点（纯状态转换）
  * ================================================================
  *
- * 每个节点是 LangGraph StateGraph 中的一个步骤。
- * 节点函数签名: (state: typeof AgentState.State) => Partial<typeof AgentState.State>
- *
- * 节点间通过 AgentState 共享数据。
- * 节点不应有副作用（除调用 LLM 和 SDK 外），所有输出写入 state。
- *
- * 【节点总览】
- *   analyze   →  LLM 分析用户需求，输出结构化意图
- *   plan      →  LLM 制定语义化任务清单
- *   execute   →  LLM 驱动执行（调用 SDK 工具）
- *   validate  →  LLM 验证执行结果
- *   remember  →  保存记忆到存储模块
- * ================================================================
+ * 【SSE 事件由谁发射？】
+ *   - on_chat_model_stream  → wsAgentHandler 映射为 thought/content
+ *   - on_chain_start        → wsAgentHandler 映射为 phase_start/status
+ *   - on_chain_end          → wsAgentHandler 映射为 phase_end
+ *   - tool_start/result     → 节点内 getWriter 发射（WS handler 无法生成）
+ *   - doc_target            → on_chain_end(docTarget) 状态输出
  */
 
 import { ChatOpenAI } from "@langchain/openai";
-import { SystemMessage, HumanMessage } from "@langchain/core/messages";
-import { AnalyzeTool, PlanTool, ExecuteTool, ValidateTool } from "../tools";
+import { RunnableConfig } from "@langchain/core/runnables";
+import { BaseMessage } from "@langchain/core/messages";
+import { getWriter } from "@langchain/langgraph";
+import type { PhaseStreamStrategy } from "../agent/phaseStrategy";
+import { executeTasksStream } from "../tools/executeTool";
+import { getToolMetadataByName } from "../tools/sdkTools";
+import { AnalysisOutputTool, PlanOutputTool, ValidateOutputTool } from "../tools/outputSchemas";
+import {
+  buildAnalyzePhase, buildPlanPhase, buildValidatePhase,
+  generateSystemPrompt,
+  ANTI_LEAK_RULES, CLASSIFICATION_RULES, LANGUAGE_RULES,
+} from "../prompts";
 import { retrieveMemory, manageMemory } from "../core/memory";
+import { fileRegistry } from "../../services/fileRegistry";
 import { AgentState } from "./state";
 
-/**
- * ================================================================
- * 【Analyze 节点】— 需求分析
- * ================================================================
- *
- * ┌─ 职责 ──────────────────────────────────────────────────────────┐
- * │ 用 LLM 分析用户需求，输出结构化的操作意图。                       │
- * │ 只关心"用户想要什么"，不关心"具体怎么实现"。                     │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 数据流 ────────────────────────────────────────────────────────┐
- * │ 输入: user_input + doc_context + related_memory                 │
- * │ 输出: analysis（JSON 字符串，含 intent/operations/context_hints）│
- * │ LLM 角色: "需求分析师"                                           │
- * └─────────────────────────────────────────────────────────────────┘
- */
-export function createAnalyzeNode(llm: ChatOpenAI) {
-  const tool = new AnalyzeTool(llm);
-  return async (state: typeof AgentState.State): Promise<Partial<typeof AgentState.State>> => {
-    const analysis = await tool._call({
-      user_input: state.user_input,
-      related_memory: state.related_memory,
-      doc_context: state.doc_context,
-    });
-    return { analysis };
-  };
-}
+/* ============================================================== */
+/*  docTarget 节点                                                */
+/* ============================================================== */
 
-/**
- * ================================================================
- * 【Plan 节点】— 任务规划
- * ================================================================
- *
- * ┌─ 职责 ──────────────────────────────────────────────────────────┐
- * │ 根据分析结果，制定语义化的任务清单。                              │
- * │ 输出的是"要做什么"（goal/description/constraints），              │
- * │ 不是"怎么做"（action/params）。                                 │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 数据流 ────────────────────────────────────────────────────────┐
- * │ 输入: analysis + doc_context + related_memory                   │
- * │ 输出: plan（JSON 字符串，含 tasks[]/dependencies/failback）      │
- * │ LLM 角色: "项目经理"                                             │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 与旧版的区别 ─────────────────────────────────────────────────┐
- * │ 旧版输出: { steps: [{ action, params }] }   →  死指令          │
- * │ 新版输出: { tasks: [{ goal, description }] } →  语义化任务      │
- * └─────────────────────────────────────────────────────────────────┘
- */
-export function createPlanNode(llm: ChatOpenAI) {
-  const tool = new PlanTool(llm);
-  return async (state: typeof AgentState.State): Promise<Partial<typeof AgentState.State>> => {
-    const plan = await tool._call({
-      analysis: state.analysis,
-      related_memory: state.related_memory,
-      doc_context: state.doc_context,
-    });
-    return { plan };
-  };
-}
+export function createDocTargetNode(_llm: ChatOpenAI, _strategy: PhaseStreamStrategy) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    const userInput = state.userInput;
+    const contextDocId = state.docId;
+    const allDocs = fileRegistry.getAll();
+    const docContext = fileRegistry.toContextString(contextDocId);
 
-/**
- * ================================================================
- * 【Execute 节点】— LLM 驱动的智能执行
- * ================================================================
- *
- * ┌─ 职责 ──────────────────────────────────────────────────────────┐
- * │ 根据 Plan 的语义化任务清单，由 LLM 自主调用 SDK 工具完成操作。    │
- * │ LLM 决定"怎么做"——先做什么、用什么工具、失败了怎么办。            │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ LLM 输出 → SDK 调用 映射表 ──────────────────────────────────┐
- * │                                                                │
- * │  LLM 决策（自然语言）           SDK 调用（封装在 editor 中）    │
- * │  ──────────────────────         ─────────────────────           │
- * │  "查找'公司'出现在哪"          sdk_find_text("公司")            │
- * │                                  → editor.findText(docId, "公司")│
- * │                                    → doc.query.match(...)      │
- * │                                                                │
- * │  "把'公司'替换为'集团'"        sdk_replace_text("公司","集团") │
- * │                                  → editor.replaceFirst(...)    │
- * │                                    → doc.mutations.apply(...)  │
- * │                                                                │
- * │  "全部替换"                    sdk_replace_all("公司","集团")  │
- * │                                  → editor.replaceAll(...)      │
- * │                                    → doc.mutations.apply(...)  │
- * │                                                                │
- * │  "看看改完没"                  sdk_get_text()                  │
- * │                                  → editor.getText(docId)       │
- * │                                    → doc.getText()             │
- * │                                                                │
- * │  "保存"                        sdk_save()                      │
- * │                                  → sessionManager → doc.save() │
- * │                                                                │
- * │  LLM 通过 tool calling 调用 StructuredTool，                     │
- * │  工具内部调用 editor 的封装函数（已有的 SDK Agent）。             │
- * │  所有 SDK 调用都经过 editor 模块，不直接操作 doc 对象。          │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 异常处理 ────────────────────────────────────────────────────┐
- * │ 1. SDK 调用失败 → LLM 读取错误信息                              │
- * │ 2. LLM 参照 Plan 的 fallback_strategies                         │
- * │ 3. 尝试替代方案（模糊匹配、变体查找）                            │
- * │ 4. 记录失败原因到 execution_log                                 │
- * │ 5. 连续失败 3 次 → 跳过该任务                                   │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 协作同步 ────────────────────────────────────────────────────┐
- * │ editor 内部通过 sessionManager 连接到 Yjs 协作房间，            │
- * │ 所有 mutations.apply 操作实时同步到前端和 Python AI。           │
- * │ 不需要手动关注同步细节。                                        │
- * └─────────────────────────────────────────────────────────────────┘
- */
-export function createExecuteNode(llm: ChatOpenAI) {
-  const tool = new ExecuteTool(llm);
-  return async (state: typeof AgentState.State): Promise<Partial<typeof AgentState.State>> => {
-    const execution_log = await tool._call({
-      plan_tasks: state.plan,
-      docId: state.docId,
-    });
-    return { execution_log };
-  };
-}
-
-/**
- * ================================================================
- * 【Validate 节点】— 结果验证
- * ================================================================
- *
- * ┌─ 职责 ──────────────────────────────────────────────────────────┐
- * │ 用 LLM 验证执行结果是否符合预期。                                │
- * │ 判断成功/失败，决定是否可重试或需要用户介入。                    │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 数据流 ────────────────────────────────────────────────────────┐
- * │ 输入: execution_log + plan                                     │
- * │ 输出: validate_result（JSON）+ retryable + needs_user_input     │
- * │ LLM 角色: "质检员"                                              │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 判断逻辑 ────────────────────────────────────────────────────┐
- * │ retryable=true:    临时性问题（网络、超时、偶发错误）            │
- * │ retryable=false:   根本性问题（文档不存在、权限不足）            │
- * │ needs_user_input:  需要用户提供更多信息或确认                   │
- * └─────────────────────────────────────────────────────────────────┘
- */
-export function createValidateNode(llm: ChatOpenAI) {
-  const tool = new ValidateTool(llm);
-  return async (state: typeof AgentState.State): Promise<Partial<typeof AgentState.State>> => {
-    const validateResultStr = await tool._call({
-      execution_log: state.execution_log,
-      plan_tasks: state.plan,
-    });
-
-    // 解析验证结果中的控制字段
-    let retryable = true;
-    let needs_user_input = false;
-    let success = false;
-    try {
-      const parsed = JSON.parse(validateResultStr);
-      retryable = parsed.retryable !== false;
-      needs_user_input = parsed.needs_user_input === true;
-      success = parsed.result === "成功";
-    } catch {
-      // 解析失败则保持默认值
+    let targetDocId: string | undefined;
+    if (allDocs.length === 1) targetDocId = allDocs[0].docId;
+    else {
+      for (const doc of allDocs) {
+        if (userInput.includes(doc.originalName)) { targetDocId = doc.docId; break; }
+        if (userInput.includes(doc.originalName.replace(/\.\w+$/, ""))) { targetDocId = doc.docId; break; }
+      }
+      targetDocId = targetDocId || (contextDocId && fileRegistry.get(contextDocId) ? contextDocId : allDocs[0]?.docId);
     }
 
+    if (!targetDocId) throw new Error("无法确定目标文档");
+
     return {
-      validate_result: validateResultStr,
-      retryable,
-      needs_user_input,
-      success,
+      docId: targetDocId,
+      docContext,
+      targetDocName: fileRegistry.get(targetDocId)?.originalName || targetDocId,
+      relatedMemory: retrieveMemory(targetDocId, userInput),
     };
   };
 }
 
-/**
- * ================================================================
- * 【Remember 节点】— 保存记忆
- * ================================================================
- *
- * ┌─ 职责 ──────────────────────────────────────────────────────────┐
- * │ 将本次执行的历史记录保存到记忆模块，供后续操作参考。              │
- * │ 不调用 LLM，纯数据操作。                                        │
- * └─────────────────────────────────────────────────────────────────┘
- *
- * ┌─ 数据流 ────────────────────────────────────────────────────────┐
- * │ 输入: 整个 state                                               │
- * │ 输出: 写入 memory 存储（不修改 state）                          │
- * └─────────────────────────────────────────────────────────────────┘
- */
-export function createRememberNode() {
-  return async (state: typeof AgentState.State): Promise<Partial<typeof AgentState.State>> => {
-    // 提取失败步骤
-    const failedSteps = extractFailedSteps(state.execution_log);
+/* ============================================================== */
+/*  analyze 节点                                                   */
+/* ============================================================== */
 
-    // 保存到记忆模块
-    manageMemory(
-      state.docId,
-      state.user_input,
-      state.retry_count,
-      state.success ? "成功" : "失败",
-      state.analysis,
-      state.plan,
-      state.execution_log,
-      failedSteps
-    );
+export function createAnalyzeNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    const { thoughtMessages, toolSystemMessage, toolContext } =
+      await buildAnalyzePhase({
+        classification_rules: CLASSIFICATION_RULES,
+        anti_leak_rules: ANTI_LEAK_RULES,
+        user_input: state.userInput,
+        doc_context: state.docContext,
+        related_memory: state.relatedMemory,
+      });
 
-    // 更新重试计数
-    const newRetryCount = state.retry_count + 1;
+    const gen = strategy.execute(llm, thoughtMessages, new AnalysisOutputTool(), toolSystemMessage, toolContext);
+    let r = await gen.next();
+    while (!r.done) r = await gen.next();
+    const analysisObj = r.value || {};
 
-    return {
-      related_memory: retrieveMemory(state.docId, state.user_input),
-      retry_count: newRetryCount,
-    };
+    return { analysis: JSON.stringify(analysisObj) };
   };
 }
 
-/**
- * 从执行日志中提取失败步骤的辅助函数
- */
-function extractFailedSteps(executionLog: string): string[] {
-  const failed: string[] = [];
-  const lines = executionLog.split("\n");
-  for (const line of lines) {
-    if (line.includes("失败") && line.includes("[工具]")) {
-      const match = line.match(/\[工具\]\s*(\w+)/);
-      if (match) {
-        failed.push(match[1]);
+/* ============================================================== */
+/*  plan 节点                                                      */
+/* ============================================================== */
+
+export function createPlanNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    const { thoughtMessages, toolSystemMessage, toolContext } =
+      await buildPlanPhase({
+        anti_leak_rules: ANTI_LEAK_RULES,
+        clean_analysis: state.analysis,
+        doc_context: state.docContext,
+        doc_snippet: state.cachedDocText || "",
+      });
+
+    const gen = strategy.execute(llm, thoughtMessages, new PlanOutputTool(), toolSystemMessage, toolContext);
+    let r = await gen.next();
+    while (!r.done) r = await gen.next();
+    const planObj = r.value || { tasks: [] };
+
+    return { planJson: JSON.stringify(planObj) };
+  };
+}
+
+/* ============================================================== */
+/*  execute 节点（流式工具调用）                                   */
+/* ============================================================== */
+
+export function createExecuteNode(llm: ChatOpenAI) {
+  return async (state: typeof AgentState.State, config?: RunnableConfig) => {
+    const planTasks = (() => { try { return JSON.parse(state.planJson).tasks || []; } catch { return []; } })();
+    let executionLog = "";
+    let executeSuccess: boolean | null = null;
+    let cachedDocText = state.cachedDocText;
+    const writer = getWriter(config);
+
+    for await (const event of executeTasksStream(llm, state.docId, planTasks)) {
+      switch (event.type) {
+        case "tool_start": {
+          const meta = getToolMetadataByName(event.tool!);
+          if (!meta.showInUI) continue;
+          let rawArgs: Record<string, unknown> = {};
+          if (event.args) { try { rawArgs = JSON.parse(event.args); } catch { rawArgs = {}; } }
+          writer?.({ type: "tool_start", data: { tool: meta.displayName, args: meta.argsFormatter(rawArgs) } });
+          break;
+        }
+        case "tool_result": {
+          const meta = getToolMetadataByName(event.tool!);
+          if (!meta.showInUI) continue;
+          writer?.({ type: "tool_result", data: { success: event.status === "success", tool: meta.displayName, result: event.result || "完成" } });
+          if (event.tool === "sdk_get_text" && event.status === "success" && event.result) {
+            const m = event.result.match(/：(.+)/);
+            cachedDocText = m ? m[1] : event.result;
+          }
+          break;
+        }
+        case "done": {
+          executionLog = event.executionLog || "";
+          executeSuccess = event.success ?? null;
+          break;
+        }
       }
+    }
+
+    return { executionLog, cachedDocText, success: executeSuccess === true };
+  };
+}
+
+/* ============================================================== */
+/*  generate 节点                                                  */
+/* ============================================================== */
+
+export function createGenerateNode(llm: ChatOpenAI) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    const docSnippet = (state.cachedDocText || "").length > 4000
+      ? state.cachedDocText.substring(0, 4000) + "..."
+      : state.cachedDocText || "（无文档内容）";
+
+    const messages = await generateSystemPrompt.formatMessages({
+      language_rules: LANGUAGE_RULES,
+      user_input: state.userInput,
+      execution_summary: state.executionLog.split("\n").slice(0, 10).join("\n"),
+      doc_snippet: docSnippet,
+    });
+
+    const stream = await llm.stream(messages);
+    for await (const _ of stream) { /* tokens flow via on_chat_model_stream in WS handler */ }
+
+    return {};
+  };
+}
+
+/* ============================================================== */
+/*  validate 节点                                                  */
+/* ============================================================== */
+
+export function createValidateNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    const { thoughtMessages, toolSystemMessage, toolContext } =
+      await buildValidatePhase({
+        anti_leak_rules: ANTI_LEAK_RULES,
+        execution_log: state.executionLog,
+        plan_tasks: state.planJson,
+      });
+
+    const gen = strategy.execute(llm, thoughtMessages, new ValidateOutputTool(), toolSystemMessage, toolContext);
+    let r = await gen.next();
+    while (!r.done) r = await gen.next();
+    const validateObj = r.value as Record<string, unknown> | null;
+
+    manageMemory(state.docId, state.userInput, state.retryCount,
+      (validateObj as any)?.result === "成功" ? "成功" : "失败",
+      state.analysis, state.planJson, state.executionLog,
+      extractFailedSteps(state.executionLog));
+
+    const success = (validateObj as any)?.result === "成功";
+    const retryable = (validateObj as any)?.retryable !== false;
+    const needsUserInput = (validateObj as any)?.needs_user_input === true;
+
+    if (!validateObj && state.success) {
+      return { validateJson: "{}", success: true, retryable: false, needsUserInput: false };
+    }
+
+    return { validateJson: JSON.stringify(validateObj), success, retryable, needsUserInput };
+  };
+}
+
+/* ============================================================== */
+/*  辅助函数                                                       */
+/* ============================================================== */
+
+function extractFailedSteps(log: string): string[] {
+  const failed: string[] = [];
+  for (const line of log.split("\n")) {
+    if (line.includes("执行失败")) {
+      const m = line.match(/sdk_(\w+)/);
+      if (m) failed.push(m[1]);
     }
   }
   return failed;
