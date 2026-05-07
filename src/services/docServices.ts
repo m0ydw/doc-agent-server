@@ -1,22 +1,27 @@
-import fs from "fs";
+import fs from "fs/promises";
+import { existsSync, mkdirSync } from "fs";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 
 export const UPLOAD_DIR = path.join(__dirname, "../../uploads");
 
-// 确保上传目录存在
+// ================================================================
+// 目录辅助（同步 - 只在启动和初始化时调用，不影响事件循环）
+// ================================================================
+
 function ensureUploadDir(): void {
-  if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  if (!existsSync(UPLOAD_DIR)) {
+    mkdirSync(UPLOAD_DIR, { recursive: true });
   }
 }
 
-// 生成文件 ID
 function generateFileId(): string {
   return uuidv4();
 }
 
-// ===== 文档元数据 =====
+// ================================================================
+// 文档元数据
+// ================================================================
 
 export interface DocumentMetadata {
   id: string;
@@ -29,18 +34,16 @@ export interface DocumentMetadata {
   filePath: string;
 }
 
-// ===== 基础文件服务 =====
+// ================================================================
+// 基础文件服务（全部异步）
+// ================================================================
 
-/**
- * 保存文档（写入临时种子文件，播种后会被删除）
- * 返回元数据供后续使用
- */
-export function saveDocument(file: {
+export async function saveDocument(file: {
   originalname: string;
   buffer: Buffer;
   size: number;
   mimetype: string;
-}): DocumentMetadata {
+}): Promise<DocumentMetadata> {
   ensureUploadDir();
 
   const fileId = generateFileId();
@@ -49,7 +52,7 @@ export function saveDocument(file: {
   const filePath = path.join(UPLOAD_DIR, storedFilename);
 
   console.log("saveDocument 收到文件名:", file.originalname);
-  fs.writeFileSync(filePath, file.buffer);
+  await fs.writeFile(filePath, file.buffer);
 
   const metadata: DocumentMetadata = {
     id: fileId,
@@ -62,118 +65,79 @@ export function saveDocument(file: {
     filePath: `/uploads/${storedFilename}`,
   };
 
-  // 保存元数据 JSON
   const metadataPath = path.join(UPLOAD_DIR, `${fileId}.json`);
-  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
+  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
   return metadata;
 }
 
-/**
- * 获取文档元数据列表
- */
-export function getDocumentList(): DocumentMetadata[] {
+export async function getDocumentList(): Promise<DocumentMetadata[]> {
   ensureUploadDir();
 
-  const files = fs.readdirSync(UPLOAD_DIR);
+  const files = await fs.readdir(UPLOAD_DIR);
   const metadataFiles = files.filter((f) => f.endsWith(".json"));
 
-  const documents = metadataFiles
-    .map((f) => {
-      try {
-        const content = fs.readFileSync(path.join(UPLOAD_DIR, f), "utf-8");
-        const doc = JSON.parse(content) as DocumentMetadata;
-        if (!doc.roomName) {
-          doc.roomName = doc.id;
-        }
-        return doc;
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean) as DocumentMetadata[];
+  const documents: DocumentMetadata[] = [];
+  for (const f of metadataFiles) {
+    try {
+      const content = await fs.readFile(path.join(UPLOAD_DIR, f), "utf-8");
+      const doc = JSON.parse(content) as DocumentMetadata;
+      if (!doc.roomName) doc.roomName = doc.id;
+      documents.push(doc);
+    } catch {
+      // 忽略损坏的元数据文件
+    }
+  }
 
   return documents.sort(
     (a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
   );
 }
 
-/**
- * 根据 ID 获取文档元数据
- */
-export function getDocumentById(id: string): DocumentMetadata | null {
+export async function getDocumentById(id: string): Promise<DocumentMetadata | null> {
   const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
 
-  if (!fs.existsSync(metadataPath)) {
-    return null;
-  }
-
   try {
-    const content = fs.readFileSync(metadataPath, "utf-8");
+    await fs.access(metadataPath);
+    const content = await fs.readFile(metadataPath, "utf-8");
     const doc = JSON.parse(content) as DocumentMetadata;
-    if (!doc.roomName) {
-      doc.roomName = doc.id;
-    }
+    if (!doc.roomName) doc.roomName = doc.id;
     return doc;
   } catch {
     return null;
   }
 }
 
-/**
- * 获取文档文件路径和元数据
- */
-export function getDocumentFile(
+export async function getDocumentFile(
   id: string
-): { path: string; metadata: DocumentMetadata } | null {
-  const metadata = getDocumentById(id);
-
-  if (!metadata) {
-    return null;
-  }
+): Promise<{ filePath: string; metadata: DocumentMetadata } | null> {
+  const metadata = await getDocumentById(id);
+  if (!metadata) return null;
 
   const filePath = path.join(UPLOAD_DIR, metadata.storedName);
-
-  if (!fs.existsSync(filePath)) {
-    // 文件可能被删除了（如种子文件），返回元数据但不包含文件
+  try {
+    await fs.access(filePath);
+    return { filePath, metadata };
+  } catch {
     return null;
   }
-
-  return {
-    path: filePath,
-    metadata,
-  };
 }
 
-/**
- * 删除文档
- */
-export function deleteDocument(id: string): boolean {
-  const metadata = getDocumentById(id);
-
-  if (!metadata) {
-    return false;
-  }
+export async function deleteDocument(id: string): Promise<boolean> {
+  const metadata = await getDocumentById(id);
+  if (!metadata) return false;
 
   const filePath = path.join(UPLOAD_DIR, metadata.storedName);
   const metadataPath = path.join(UPLOAD_DIR, `${id}.json`);
 
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
-
-  if (fs.existsSync(metadataPath)) {
-    fs.unlinkSync(metadataPath);
-  }
+  try { await fs.unlink(filePath); } catch { /* ignore */ }
+  try { await fs.unlink(metadataPath); } catch { /* ignore */ }
 
   return true;
 }
 
-/**
- * 清理文档（批量删除）
- */
-export function cleanupDocuments(keepIds: string[]): number {
-  const allDocs = getDocumentList();
+export async function cleanupDocuments(keepIds: string[]): Promise<number> {
+  const allDocs = await getDocumentList();
   let deletedCount = 0;
 
   for (const doc of allDocs) {
@@ -181,13 +145,8 @@ export function cleanupDocuments(keepIds: string[]): number {
       const filePath = path.join(UPLOAD_DIR, doc.storedName);
       const metadataPath = path.join(UPLOAD_DIR, `${doc.id}.json`);
 
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
-      if (fs.existsSync(metadataPath)) {
-        fs.unlinkSync(metadataPath);
-      }
-      deletedCount++;
+      try { await fs.unlink(filePath); deletedCount++; } catch { /* ignore */ }
+      try { await fs.unlink(metadataPath); } catch { /* ignore */ }
       console.log(`清理文件: ${doc.originalName} (${doc.id})`);
     }
   }

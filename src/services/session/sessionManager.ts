@@ -7,8 +7,36 @@ import {
 import { getDocumentById } from "../docServices";
 import config from "../../config";
 
-const sessions = new Map<string, any>();
+const sessions = new Map<string, { sessionId: string; doc: Document; docPath: string; roomName: string; createdAt: number; lastActivity: number }>();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
+
+/** 会话空闲超时（30分钟无活动自动清理） */
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * 启动定时清理过期会话
+ */
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+function startSessionCleanup(): void {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [docId, session] of sessions) {
+      if (now - session.lastActivity > SESSION_IDLE_TIMEOUT_MS) {
+        console.log(`[SessionManager] 清理过期会话: ${session.sessionId} (空闲超时)`);
+        try {
+          void closeDocument(session.doc);
+        } catch (e) {
+          console.error(`[SessionManager] 关闭过期会话失败: ${(e as Error).message}`);
+        }
+        sessions.delete(docId);
+      }
+    }
+  }, 60 * 1000); // 每分钟检查一次
+}
+
+startSessionCleanup();
 
 /**
  * 通过文档 ID 获取房间名
@@ -21,20 +49,21 @@ function resolveRoomName(docId: string, metadata: any) {
  * Agent 加入已有协作房间（y-websocket 协议）
  */
 export async function createOrUseSession(docId: string): Promise<{ sessionId: string; doc: Document }> {
-  const metadata = getDocumentById(docId);
+  const metadata = await getDocumentById(docId);
   if (!metadata) throw new Error(`文档不存在: ${docId}`);
   const roomName = resolveRoomName(docId, metadata);
 
   // 检查是否有已有会话，直接复用
   if (sessions.has(docId)) {
-    const session = sessions.get(docId);
+    const session = sessions.get(docId)!;
+    session.lastActivity = Date.now(); // 更新活跃时间
     console.log(`[SessionManager] 使用已有会话: ${session.sessionId} for ${docId}`);
     return { sessionId: session.sessionId, doc: session.doc };
   }
 
   // 获取已存储文件路径
-  const { DOCS_DIR } = await import("../cliRunner");
-  const filePath = metadata.filePath?.replace("/uploads/", "") || metadata.storedName;
+    const { DOCS_DIR } = await import("../cliRunner");
+    const filePath = metadata.filePath?.replace("/uploads/", "") || metadata.storedName;
   const docPath = filePath.startsWith("/") ? filePath : `${DOCS_DIR}/${filePath}`;
 
   const sessionId = `session-${roomName}-${Date.now()}`;
@@ -48,7 +77,7 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
       collabDocumentId: roomName,
     });
 
-    sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now() });
+    sessions.set(docId, { sessionId, doc, docPath, roomName, createdAt: Date.now(), lastActivity: Date.now() });
     return { sessionId, doc };
   } catch (error: any) {
     const isTimeout = error?.code === 'COLLABORATION_SYNC_TIMEOUT'
@@ -69,7 +98,7 @@ export async function createOrUseSession(docId: string): Promise<{ sessionId: st
 export async function ensureYjsRoom(
   docId: string
 ): Promise<{ docId: string; roomName: string; wsUrl: string }> {
-  const metadata = getDocumentById(docId);
+  const metadata = await getDocumentById(docId);
   if (!metadata) throw new Error(`文档不存在: ${docId}`);
   const roomName = resolveRoomName(docId, metadata);
   return { docId, roomName, wsUrl: COLLAB_WS_URL };

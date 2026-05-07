@@ -1,7 +1,6 @@
 import express, { Request, Response, Router } from "express";
-import multer from "multer";
+import multer, { FileFilterCallback } from "multer";
 import path from "path";
-import fs from "fs";
 import config from "../config";
 import {
   saveDocument,
@@ -22,9 +21,9 @@ const COLLAB_WS_URL = config.COLLAB_WS_URL;
 function decodeFilename(filename: string): string {
   if (!filename) return filename;
   try {
-    var decoded = decodeURIComponent(filename);
+    const decoded = decodeURIComponent(filename);
     if (decoded !== filename) return decoded;
-    var buffer = Buffer.from(filename, "binary");
+    const buffer = Buffer.from(filename, "binary");
     return buffer.toString("utf8");
   } catch {
     return filename;
@@ -32,6 +31,11 @@ function decodeFilename(filename: string): string {
 }
 
 // ===== 辅助函数 =====
+
+/** Express 5.x 中 req.params.id 可能返回 string | string[] */
+function getParamId(req: Request): string {
+  return String(req.params.id);
+}
 
 function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: string; wsUrl: string }) {
   const roomName = roomInfo?.roomName || document.roomName || document.id;
@@ -62,7 +66,7 @@ router.post("/cleanup", async (req: Request, res: Response) => {
     // 关闭所有 SDK 会话
     await sessionManager.closeAllSessions();
     // 清理磁盘文件
-    var deleted = cleanupDocuments(keepIds);
+    const deleted = await cleanupDocuments(keepIds);
     // 重新初始化文件映射表（cleanup 后重新扫描）
     const { initFileRegistry } = await import("../services/fileRegistry");
     initFileRegistry();
@@ -78,20 +82,24 @@ const storage = multer.memoryStorage();
 
 const upload = multer({
   storage: storage,
-  fileFilter: function (_req, file, cb) {
-    var allowedTypes = [
+  fileFilter: function (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) {
+    const allowedTypes = [
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       "application/msword",
     ];
-    var allowedExtensions = [".docx", ".doc"];
+    const allowedExtensions = [".docx", ".doc"];
 
-    var ext = path.extname(file.originalname).toLowerCase();
+    const ext = path.extname(file.originalname).toLowerCase();
     console.log("fileFilter: ext=", ext);
 
     if (allowedTypes.indexOf(file.mimetype) >= 0 || allowedExtensions.indexOf(ext) >= 0) {
-      (cb as any)(null, true);
+      // multer 2.x FileFilterCallback 类型定义不兼容
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore
+      cb(null, true);
     } else {
-      (cb as any)(new Error("只支持 .doc 和 .docx 文件"), false);
+      // @ts-ignore
+      cb(new Error("只支持 .doc 和 .docx 文件"), false);
     }
   },
   limits: {
@@ -114,12 +122,12 @@ router.post(
 
       const results = [];
 
-      for (const file of req.files as any[]) {
+      for (const file of req.files as Express.Multer.File[]) {
         // 解码文件名
         file.originalname = decodeFilename(file.originalname);
 
-        // 1. 保存文件到磁盘（保留，前端需要加载）
-        const metadata = saveDocument({
+        // 1. 保存文件到磁盘
+        const metadata = await saveDocument({
           originalname: file.originalname,
           buffer: file.buffer,
           size: file.size,
@@ -146,9 +154,9 @@ router.post(
         message: "成功上传 " + results.length + " 个文件",
         files: results,
       });
-    } catch (error) {
+    } catch (error: unknown) {
       console.error("上传文件失败:", error);
-      res.status(500).json({ error: error.message });
+      res.status(500).json({ error: error instanceof Error ? error.message : "上传失败" });
     }
   }
 );
@@ -158,7 +166,7 @@ router.post(
  */
 router.get("/list", async (req: Request, res: Response) => {
   try {
-    const documents = getDocumentList();
+    const documents = await getDocumentList();
     const mappedDocuments = documents.map((doc) =>
       withCollaboration(doc, {
         roomName: doc.id,
@@ -183,8 +191,8 @@ router.get("/list", async (req: Request, res: Response) => {
  */
 router.post("/:id/open", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
-    const document = getDocumentById(id);
+    const id = getParamId(req);
+    const document = await getDocumentById(id);
 
     if (!document) {
       return res.status(404).json({ error: "文件不存在" });
@@ -211,19 +219,19 @@ router.post("/:id/open", async (req: Request, res: Response) => {
  */
 router.get("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
+    const id = getParamId(req);
 
     // 加入协作房间
     await sessionManager.ensureYjsRoom(id);
 
-    const result = getDocumentFile(id);
+    const result = await getDocumentFile(id);
 
     if (!result) {
       // 文档可能只有 Yjs 状态，没有磁盘文件
       return res.status(404).json({ error: "文件不存在或已被清理" });
     }
 
-    const filePath = result.path;
+      const filePath = result.filePath;
     const metadata = result.metadata;
 
     res.setHeader(
@@ -248,14 +256,14 @@ router.get("/:id", async (req: Request, res: Response) => {
  */
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
-    const result = getDocumentFile(id);
+    const id = getParamId(req);
+    const result = await getDocumentFile(id);
 
     if (!result) {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    const filePath = result.path;
+      const filePath = result.filePath;
     const metadata = result.metadata;
 
     res.setHeader(
@@ -280,8 +288,8 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
  */
 router.get("/:id/info", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
-    const document = getDocumentById(id);
+    const id = getParamId(req);
+    const document = await getDocumentById(id);
 
     if (!document) {
       return res.status(404).json({ error: "文件不存在" });
@@ -305,8 +313,8 @@ router.get("/:id/info", async (req: Request, res: Response) => {
  */
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
-    const document = getDocumentById(id);
+    const id = getParamId(req);
+    const document = await getDocumentById(id);
 
     // 关闭 SDK 会话
     await sessionManager.closeSessionByDocId(id);
@@ -314,7 +322,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
     // 从文件映射表注销
     unregisterDocument(id);
 
-    const success = deleteDocument(id);
+    const success = await deleteDocument(id);
 
     if (!success) {
       return res.status(404).json({ error: "文件不存在" });

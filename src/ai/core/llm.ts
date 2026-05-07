@@ -90,6 +90,7 @@ export function createChatModel(config: LLMConfig): ChatOpenAI {
     apiKey: config.apiKey,
     model,
     temperature: config.temperature ?? 0.1,
+    timeout: 120000, // 2 分钟超时（行业标准）
     configuration: { baseURL: providerCfg.baseURL },
     modelKwargs: Object.keys(modelKwargs).length > 0 ? modelKwargs : undefined,
   });

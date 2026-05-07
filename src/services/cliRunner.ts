@@ -3,36 +3,55 @@ import path from "path";
 // 文档目录
 const DOCS_DIR = path.join(__dirname, "../../uploads");
 
-// SDK 客户端（单例）
-let client: any = null;
+// SDK 客户端（单例 + 并发保护）
+let client: unknown = null;
 let isConnected = false;
+let connectPromise: Promise<unknown> | null = null;
 
-async function getClient(): Promise<any> {
+async function getClient(): Promise<unknown> {
   if (client && isConnected) {
     return client;
   }
 
-  const superdoc = await import("@superdoc-dev/sdk");
-  const createSuperDocClient = superdoc.createSuperDocClient;
+  // 并发保护：如果正在连接中，复用同一个 Promise
+  if (connectPromise) {
+    return connectPromise;
+  }
 
-  client = createSuperDocClient({
-    env: {
-      SUPERDOC_DEBUG_TEXT_REWRITE: "1",
-    },
-    user: { name: "Agent", email: "agent@local" },
-    requestTimeoutMs: 90000,
-    watchdogTimeoutMs: 90000,
-  });
-  await client.connect();
-  isConnected = true;
+  connectPromise = (async () => {
+    const superdoc = await import("@superdoc-dev/sdk");
+    const createSuperDocClient = (
+      superdoc as { createSuperDocClient: (opts: Record<string, unknown>) => unknown }
+    ).createSuperDocClient;
 
-  console.log("[SDK] Client connected (timeout=90s)");
-  return client;
+    client = createSuperDocClient({
+      env: {
+        SUPERDOC_DEBUG_TEXT_REWRITE: "1",
+      },
+      user: { name: "Agent", email: "agent@local" },
+      requestTimeoutMs: 90000,
+      watchdogTimeoutMs: 90000,
+    });
+
+    await (client as { connect: () => Promise<void> }).connect();
+    isConnected = true;
+    console.log("[SDK] Client connected (timeout=90s)");
+    return client;
+  })();
+
+  try {
+    const result = await connectPromise;
+    connectPromise = null;
+    return result;
+  } catch (error) {
+    connectPromise = null;
+    throw error;
+  }
 }
 
 async function disposeClient(): Promise<void> {
   if (client) {
-    await client.dispose();
+    await (client as { dispose: () => Promise<void> }).dispose();
     client = null;
     isConnected = false;
     console.log("[SDK] Client disposed");
@@ -78,7 +97,7 @@ async function openDocument(params: OpenParams): Promise<Document> {
     if (bootstrapSettlingMs) openPayload.bootstrapSettlingMs = bootstrapSettlingMs;
   }
 
-  const doc = await sdkClient.open(openPayload);
+  const doc = await (sdkClient as { open: (payload: Record<string, unknown>) => Promise<Document> }).open(openPayload);
   console.log(`[SDK] Document opened: ${docPath} room=${collabDocumentId ?? 'none'}`);
   return doc;
 }

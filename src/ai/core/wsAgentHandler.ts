@@ -29,13 +29,10 @@ import { ChatOpenAI } from "@langchain/openai";
 import type { PhaseStreamStrategy } from "../agent/phaseStrategy";
 import { createWorkflow } from "../workflow/graph";
 import { getGlobalAgent } from "../agent/globalAgent";
+import config from "../../config";
+import { logger } from "../../app";
 
-// ================================================================
-// 流式切割常量
-// ================================================================
-
-const STREAM_CHUNK_SIZE = 60;
-const STREAM_CUT_WINDOW = 64;
+const PORT = config.PORT;
 
 // ================================================================
 // 消息类型
@@ -50,21 +47,6 @@ interface ClientMessage {
     mode?: "workflow" | "chat";
     modelConfig?: Record<string, unknown>;
   };
-}
-
-// ================================================================
-// 流式切割
-// ================================================================
-
-function cutStream(buffer: string): { chunk: string; rest: string } {
-  if (buffer.length < STREAM_CHUNK_SIZE) return { chunk: "", rest: buffer };
-  const cutIdx = Math.max(
-    buffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
-    buffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
-    buffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
-    STREAM_CHUNK_SIZE
-  );
-  return { chunk: buffer.slice(0, cutIdx), rest: buffer.slice(cutIdx) };
 }
 
 // ================================================================
@@ -137,18 +119,25 @@ function extractTodoList(planJson: string): Array<{ id: string; goal: string }> 
 
 export function attachAgentWs(httpServer: Server): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws/agent" });
-  console.log("[AgentWS] 已启动: ws://localhost" + (httpServer as any).address()?.port + "/ws/agent");
+  const addr = httpServer.address();
+  const port = addr && typeof addr === 'object' ? addr.port : PORT;
+  logger.info("[AgentWS] 已启动: ws://localhost:" + port + "/ws/agent");
 
   wss.on("connection", (ws: WebSocket) => {
-    console.log("[AgentWS] 客户端已连接");
-    let cancelled = false;
+    logger.info("[AgentWS] 客户端已连接");
+    let currentAbortController: AbortController | null = null;
 
     ws.on("message", async (raw: Buffer) => {
       let msg: ClientMessage;
       try { msg = JSON.parse(raw.toString()); } catch {
         send(ws, "error", { message: "无效的 JSON 消息" }); return;
       }
-      if (msg.type === "cancel") { cancelled = true; return; }
+      if (msg.type === "cancel") {
+        // 取消当前请求
+        currentAbortController?.abort();
+        currentAbortController = null;
+        return;
+      }
       if (msg.type !== "agent_message") return;
 
       const agent = getGlobalAgent();
@@ -158,8 +147,13 @@ export function attachAgentWs(httpServer: Server): void {
         return;
       }
 
-      const llm = (agent as any).llm as ChatOpenAI;
-      const strategy = (agent as any).phaseStrategy as PhaseStreamStrategy;
+      const llm = agent.currentLlm;
+      const strategy = agent.currentStrategy;
+      if (!llm || !strategy) {
+        send(ws, "error", { message: "Agent LLM/策略未初始化" });
+        send(ws, "done", { id: msg.id });
+        return;
+      }
       const data = msg.data || {};
 
       if (data.mode === "chat") {
@@ -168,36 +162,29 @@ export function attachAgentWs(httpServer: Server): void {
       }
 
       // ===== LangGraph 工作流（标准 streamMode）=====
-      cancelled = false;
+      const abortController = new AbortController();
+      currentAbortController = abortController;
       const graph = createWorkflow(llm, strategy);
 
       try {
         const stream = graph.streamEvents(
           { userInput: data.message || "", docId: data.docId || "", maxRetry: 3, retryCount: 0 },
-          { version: "v2", streamMode: ["messages", "custom"] }
+          { version: "v2", streamMode: ["messages", "custom"], signal: abortController.signal }
         );
 
-        let tokenBuffer = "";
         let currentPhase: string | null = null;
 
         for await (const event of stream) {
-          if (cancelled) break;
 
           switch (event.event) {
 
-            // ===== LLM token 流（real-time）=====
+            // ===== LLM token 流（逐 token 发送，前端累积渲染）=====
             case "on_chat_model_stream": {
               const content = event.data?.chunk?.content || "";
               if (!content) break;
-              tokenBuffer += content;
-
-              const { chunk, rest } = cutStream(tokenBuffer);
-              if (chunk) {
-                const phase = event.metadata?.langgraph_node;
-                const type = (phase === "generate") ? "content" : "thought";
-                send(ws, type, { content: chunk });
-                tokenBuffer = rest;
-              }
+              const phase = event.metadata?.langgraph_node;
+              const type = (phase === "generate") ? "content" : "thought";
+              send(ws, type, { content });
               break;
             }
 
@@ -216,13 +203,6 @@ export function attachAgentWs(httpServer: Server): void {
             case "on_chain_end": {
               const nodeName = event.name;
               const output = event.data?.output as Record<string, unknown> | undefined;
-
-              // flush tokenBuffer
-              if (tokenBuffer.trim()) {
-                const type = (nodeName === "generate") ? "content" : "thought";
-                send(ws, type, { content: tokenBuffer.trim() });
-                tokenBuffer = "";
-              }
 
               // ★ 节点特定事件
               if (nodeName === "docTarget" && output?.targetDocName) {
@@ -281,7 +261,10 @@ export function attachAgentWs(httpServer: Server): void {
       send(ws, "done", { id: msg.id });
     });
 
-    ws.on("close", () => { cancelled = true; console.log("[AgentWS] 已断开"); });
+    ws.on("close", () => {
+      currentAbortController?.abort();
+      logger.info("[AgentWS] 已断开");
+    });
   });
 }
 

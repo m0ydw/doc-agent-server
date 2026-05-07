@@ -55,7 +55,7 @@ router.post("/replace", async (req: Request, res: Response) => {
  */
 router.get("/text/:id", async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
     const text = await editor.getText(id);
     res.json({
       success: true,
@@ -72,7 +72,7 @@ router.get("/text/:id", async (req: Request, res: Response) => {
  */
 router.get("/info/:id", async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
     const info = await editor.getInfo(id);
     res.json({
       success: true,

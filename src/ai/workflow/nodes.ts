@@ -55,7 +55,7 @@ export function createDocTargetNode(_llm: ChatOpenAI, _strategy: PhaseStreamStra
       docId: targetDocId,
       docContext,
       targetDocName: fileRegistry.get(targetDocId)?.originalName || targetDocId,
-      relatedMemory: retrieveMemory(targetDocId, userInput),
+      relatedMemory: await retrieveMemory(targetDocId, userInput),
     };
   };
 }
@@ -193,7 +193,7 @@ export function createValidateNode(llm: ChatOpenAI, strategy: PhaseStreamStrateg
     while (!r.done) r = await gen.next();
     const validateObj = r.value as Record<string, unknown> | null;
 
-    manageMemory(state.docId, state.userInput, state.retryCount,
+    await manageMemory(state.docId, state.userInput, state.retryCount,
       (validateObj as any)?.result === "成功" ? "成功" : "失败",
       state.analysis, state.planJson, state.executionLog,
       extractFailedSteps(state.executionLog));

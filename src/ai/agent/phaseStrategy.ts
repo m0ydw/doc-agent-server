@@ -28,64 +28,10 @@ import { sseThought, sseWarning } from "../core/sseEmitter";
 import { logLlmStreamStart, logLlmStreamFull, logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
 
 // ================================================================
-// 流式切割常量（消除魔法数字，改进项 #6）
+// thought 流式切割阈值（仅 DualCallStrategy 内部使用）
 // ================================================================
 
-/** thought 事件单次输出最小字符数（自然断句阈值） */
-export const THOUGHT_CHUNK_SIZE = 150;
-
-/** 流式内容单次输出最小字符数 */
-export const STREAM_CHUNK_SIZE = 60;
-
-/** 切割点搜索窗口（在 chunk 末尾搜索自然断点） */
-export const STREAM_CUT_WINDOW = 64;
-
-// ================================================================
-// 公共流式切割函数（消除 chat/generate 两处 100% 重复，改进项 #15）
-// ================================================================
-
-/**
- * 对 LLM 流式输出进行自然断句切割（async generator）
- *
- * 两处使用场景：
- *   - Chat 模式: prefix="[chat]"
- *   - Generate 阶段: prefix="[content]"
- *
- * @param stream   LLM 流式响应
- * @param prefix   SSE 事件前缀
- * @yields 切割后的分片（JSON 编码保护多行内容）
- */
-export async function* streamWithCutting(
-  stream: AsyncIterable<{ content: { toString(): string } }>,
-  emit: (content: string) => string,
-  debugLabel?: string
-): AsyncGenerator<string, void, unknown> {
-  const endLog = debugLabel ? logLlmStreamStart(debugLabel) : undefined;
-  let fullText = "";
-  let buffer = "";
-  for await (const chunk of stream) {
-    const text = chunk.content.toString();
-    fullText += text;
-    buffer += text;
-    if (buffer.length >= STREAM_CHUNK_SIZE) {
-      const cutIdx = Math.max(
-        buffer.lastIndexOf("\n\n", STREAM_CUT_WINDOW) + 2,
-        buffer.lastIndexOf("\n", STREAM_CUT_WINDOW) + 1,
-        buffer.lastIndexOf(" ", STREAM_CUT_WINDOW) + 1,
-        STREAM_CHUNK_SIZE
-      );
-      yield emit(buffer.slice(0, cutIdx));
-      buffer = buffer.slice(cutIdx);
-    }
-  }
-  if (buffer) {
-    yield emit(buffer);
-  }
-  if (debugLabel) {
-    logLlmStreamFull(debugLabel, fullText);
-    endLog?.();
-  }
-}
+const THOUGHT_CHUNK_SIZE = 150;
 
 // ================================================================
 // 1. 策略接口

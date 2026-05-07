@@ -60,6 +60,14 @@ class GlobalAgent {
     return this.initialized && this.llm !== null;
   }
 
+  get currentLlm(): ChatOpenAI | null {
+    return this.llm;
+  }
+
+  get currentStrategy(): PhaseStreamStrategy | null {
+    return this.phaseStrategy;
+  }
+
   initialize(config?: GlobalAgentConfig): void {
     if (this.initialized) return;
 
@@ -69,10 +77,11 @@ class GlobalAgent {
       return;
     }
 
+    // 使用统一的标准 provider 推断（与 createChatModelFromEnv 一致）
     let provider: LLMProvider = config?.provider || "zhipu";
     if (!config?.provider) {
-      if (apiKey === process.env.DEEPSEEK_API_KEY) provider = "deepseek";
-      else if (apiKey === process.env.OPENAI_API_KEY) provider = "openai";
+      if (process.env.DEEPSEEK_API_KEY && apiKey === process.env.DEEPSEEK_API_KEY) provider = "deepseek";
+      else if (process.env.OPENAI_API_KEY && apiKey === process.env.OPENAI_API_KEY) provider = "openai";
     }
 
     const modelName = config?.modelName;
@@ -120,9 +129,10 @@ class GlobalAgent {
         (docText.length > MAX_DOC_CONTEXT_CHARS ? `\n（文档较长，以上为前 ${MAX_DOC_CONTEXT_CHARS} 字符）` : ""),
     });
 
-    const { streamWithCutting } = await import("./phaseStrategy");
     const chatStream = await this.llm!.stream(chatMessages);
-    yield* streamWithCutting(chatStream, sseChat, "Chat模式");
+    for await (const chunk of chatStream) {
+      yield sseChat(chunk.content.toString());
+    }
 
     yield sseSummary({ result: "success", summary_text: "", detail: "", failed_tasks: [] });
   }
@@ -130,6 +140,13 @@ class GlobalAgent {
   // ============================================================
   // 核心：LangGraph 工作流
   // ============================================================
+
+  // 内容查询 → Chat 模式（预检分类：仅当纯查询意图时提前分流，减少 LLM 消耗）
+  private isContentQuery(userInput: string): boolean {
+    const CONTENT_RE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
+    const MODIFY_RE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
+    return CONTENT_RE.test(userInput) && !MODIFY_RE.test(userInput);
+  }
 
   async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
     if (!this.initialized || !this.llm || !this.phaseStrategy) {
@@ -150,10 +167,8 @@ class GlobalAgent {
       return;
     }
 
-    // 内容查询 → Chat 模式
-    const CONTENT_RE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
-    const MODIFY_RE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
-    if (CONTENT_RE.test(userInput) && !MODIFY_RE.test(userInput)) {
+    // 内容查询 → Chat 模式（预处理，最终分类由 LLM analyze 节点确认）
+    if (this.isContentQuery(userInput)) {
       const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
       if (!targetDocId) { yield sseError("无法确定目标文档"); return; }
       yield sseDocTarget(fileRegistry.get(targetDocId)?.originalName || targetDocId);
@@ -183,7 +198,10 @@ class GlobalAgent {
     return allDocs[0].docId;
   }
 
-  reset(): void { clearMemories(); console.log("[GlobalAgent] 记忆已重置"); }
+  async reset(): Promise<void> {
+    await clearMemories();
+    console.log("[GlobalAgent] 记忆已重置");
+  }
 
   getStatus(): { initialized: boolean; docCount: number; memoryLength: number } {
     return { initialized: this.initialized, docCount: fileRegistry.count, memoryLength: getMemories().length };
