@@ -18,13 +18,16 @@ export { executeTasksStream, parseExecuteResult, extractDocSnippet } from "./exe
 export { ValidateTool } from "./validateTool";
 export type { ValidateOutput } from "./validateTool";
 
-// SDK 工具 + metadata（改进项 4, 7）
+// SDK 工具 + metadata
 export {
   SDKFindTextTool,
   SDKReplaceTextTool,
   SDKReplaceAllTool,
   SDKGetTextTool,
   SDKTaskCompleteTool,
+  SDKSetTextTool,
+  SDKApplyFormatTool,
+  SDKGetStructureTool,
   getToolMetadata,
   SDK_TOOL_METADATA,
   getToolMetadataByName,

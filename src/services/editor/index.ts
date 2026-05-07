@@ -3,12 +3,16 @@
  */
 
 import * as editorOperations from "./editorOperations";
+import * as formatOperations from "./formatOperations";
 
 export const findText = editorOperations.findText;
 export const replaceFirst = editorOperations.replaceFirst;
 export const replaceAll = editorOperations.replaceAll;
 export const getText = editorOperations.getTextContent;
 export const getInfo = editorOperations.getDocumentInfo;
+export const setText = formatOperations.setText;
+export const applyFormat = formatOperations.applyFormat;
+export const getStructure = formatOperations.getStructure;
 
 export default {
   findText,
@@ -16,4 +20,7 @@ export default {
   replaceAll,
   getText,
   getInfo,
+  setText,
+  applyFormat,
+  getStructure,
 };

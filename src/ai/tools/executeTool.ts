@@ -55,7 +55,7 @@ import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
-import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKTaskCompleteTool } from "./sdkTools";
+import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKTaskCompleteTool, SDKSetTextTool, SDKApplyFormatTool, SDKGetStructureTool } from "./sdkTools";
 import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
 import { extractAndParseJson } from "../core/jsonExtractor";
 import { logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
@@ -122,9 +122,12 @@ export interface ExecuteToolEvent {
 // ================================================================
 const TOOL_DESCRIPTIONS = [
   { name: "sdk_get_text()", description: "读取文档全文" },
+  { name: "sdk_get_structure()", description: "提取文档结构（表格/段落位置），填表前必调" },
   { name: "sdk_find_text(文本)", description: "查找指定文本在文档中的位置" },
   { name: "sdk_replace_text(目标, 替换)", description: "替换第一个匹配的文本" },
   { name: "sdk_replace_all(目标, 替换)", description: "替换全部匹配的文本" },
+  { name: "sdk_set_text(ref, 内容)", description: "在指定位置写入文本，保留原格式（填表核心工具）" },
+  { name: "sdk_apply_format(文本, 粗体?, 斜体?)", description: "对指定文本应用格式（加粗/斜体/下划线）" },
 ];
 
 async function buildExecuteSystemMessage(): Promise<SystemMessage> {
@@ -258,6 +261,9 @@ export async function* executeTasksStream(
     new SDKReplaceTextTool(docId),
     new SDKReplaceAllTool(docId),
     new SDKGetTextTool(docId),
+    new SDKSetTextTool(docId),
+    new SDKApplyFormatTool(docId),
+    new SDKGetStructureTool(docId),
     new SDKTaskCompleteTool(),
   ];
 
