@@ -82,7 +82,7 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     console.log("[phaseStrategy:" + this.name + "] 开始 tool calling, tool=" + outputTool.name);
     const endInvokeLog = logLlmInvokeStart("DualCall.bindTools (结构化)");
     try {
-      const llmWithTools = llm.bindTools([outputTool]);
+      const llmWithTools = llm.bindTools([outputTool], { tool_choice: "required" });
       const response = await llmWithTools.invoke([
         new SystemMessage(toolSystemMessage),
         new HumanMessage(toolContext),

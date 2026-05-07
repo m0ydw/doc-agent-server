@@ -18,7 +18,7 @@ import { getWriter } from "@langchain/langgraph";
 import type { PhaseStreamStrategy } from "../agent/phaseStrategy";
 import { executeTasksStream } from "../tools/executeTool";
 import { getToolMetadataByName } from "../tools/sdkTools";
-import { AnalysisOutputTool, PlanOutputTool, ValidateOutputTool } from "../tools/outputSchemas";
+import { AnalysisOutputTool, PlanOutputTool, ValidateOutputTool, ValidateOutputSchema } from "../tools/outputSchemas";
 import {
   buildAnalyzePhase, buildPlanPhase, buildValidatePhase,
   generateSystemPrompt,
@@ -191,22 +191,38 @@ export function createValidateNode(llm: ChatOpenAI, strategy: PhaseStreamStrateg
     const gen = strategy.execute(llm, thoughtMessages, new ValidateOutputTool(), toolSystemMessage, toolContext);
     let r = await gen.next();
     while (!r.done) r = await gen.next();
-    const validateObj = r.value as Record<string, unknown> | null;
+    const rawObj = r.value as Record<string, unknown> | null;
+
+    // 标准做法：Zod safeParse 验证 LLM 结构化输出（替代裸 as any）
+    const parsed = rawObj ? ValidateOutputSchema.safeParse(rawObj) : null;
+    const validationResult = parsed?.success
+      ? parsed.data
+      : {
+          result: "失败" as const,
+          summary: "",
+          retryable: false,
+          needs_user_input: false,
+          failed_tasks: [] as string[],
+          error_analysis: "",
+        };
+
+    const success = validationResult.result === "成功";
+    const retryable = validationResult.retryable;
+    const needsUserInput = validationResult.needs_user_input;
 
     await manageMemory(state.docId, state.userInput, state.retryCount,
-      (validateObj as any)?.result === "成功" ? "成功" : "失败",
+      success ? "成功" : "失败",
       state.analysis, state.planJson, state.executionLog,
-      extractFailedSteps(state.executionLog));
+      validationResult.failed_tasks || extractFailedSteps(state.executionLog));
 
-    const success = (validateObj as any)?.result === "成功";
-    const retryable = (validateObj as any)?.retryable !== false;
-    const needsUserInput = (validateObj as any)?.needs_user_input === true;
-
-    if (!validateObj && state.success) {
-      return { validateJson: "{}", success: true, retryable: false, needsUserInput: false };
-    }
-
-    return { validateJson: JSON.stringify(validateObj), success, retryable, needsUserInput };
+    // 标准做法：retryCount 在每次通过 validate 时递增（LangGraph 官方重试模式）
+    return {
+      validateJson: JSON.stringify(validationResult),
+      success,
+      retryable,
+      needsUserInput,
+      retryCount: state.retryCount + 1,
+    };
   };
 }
 

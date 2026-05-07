@@ -15,7 +15,14 @@ import type { BaseMessage } from "@langchain/core/messages";
  * 思考阶段：流式输出 thought，评估执行结果
  */
 export const validateThoughtPrompt = ChatPromptTemplate.fromMessages([
-  ["system", `你是操作验证专家。根据执行日志判断任务是否成功。
+  ["system", `你是操作验证专家。根据执行日志判断每个任务是否成功。
+
+【判断标准 — 严格遵守】
+1. 逐一检查原始任务清单中的每一项，在日志中查找对应的工具执行记录
+2. 日志中所有任务都标记为成功（→ 成功/✓/completed） → 输出 result="成功"
+3. 有任务失败但日志显示属于临时错误（超时、网络波动、偶发失败） → result="失败", retryable=true
+4. 任务失败且属于根本问题（文档不存在、内容为空、权限不足、格式不支持） → retryable=false
+5. 全部失败或用户必须介入才能继续 → result="失败", retryable=false, needs_user_input=true
 
 【输出规则】
 {anti_leak_rules}`],
