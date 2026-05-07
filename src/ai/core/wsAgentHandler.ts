@@ -31,6 +31,7 @@ import { createWorkflow } from "../workflow/graph";
 import { getGlobalAgent } from "../agent/globalAgent";
 import config from "../../config";
 import { logger } from "../../app";
+import { buildAnalysisSummary, buildPlanSummary, buildValidateSummary, extractTodoList } from "./summaryBuilder";
 
 const PORT = config.PORT;
 
@@ -61,57 +62,6 @@ const NODE_LABELS: Record<string, string> = {
   generate: "正在生成回答...",
   validate: "正在验证结果...",
 };
-
-// ================================================================
-// 对话式中文摘要生成器（Claude Code 风格）
-// ================================================================
-
-function buildAnalysisSummary(analysisJson: string): string | null {
-  try {
-    const data = JSON.parse(analysisJson) as Record<string, unknown>;
-    const intent = data.intent as string || "";
-    const ops = (data.operations as any[]) || [];
-    if (intent === "content_query" || (ops.length > 0 && ops[0]?.type === "query")) {
-      return `我先了解一下文档中关于「${ops[0]?.target || "相关内容"}」的信息。`;
-    }
-    if (ops.length === 0) return null;
-    const goals = ops.map((o: any) => o.goal || o.target || "").filter(Boolean);
-    if (goals.length === 0) return null;
-    return `我需要${goals.join("，然后")}。`;
-  } catch { return null; }
-}
-
-function buildPlanSummary(planJson: string): string | null {
-  try {
-    const data = JSON.parse(planJson) as Record<string, unknown>;
-    const tasks = (data.tasks as any[]) || [];
-    if (tasks.length === 0) return null;
-    const goals = tasks.map((t: any) => t.goal || "").filter(Boolean);
-    if (goals.length === 0) return null;
-    return `执行步骤：${goals.map((g: string, i: number) => `${i + 1}) ${g}`).join("；")}。`;
-  } catch { return null; }
-}
-
-function buildValidateSummary(validateJson: string): string | null {
-  try {
-    const data = JSON.parse(validateJson) as Record<string, unknown>;
-    const result = data.result as string || "";
-    if (result === "成功") return "所有操作已完成，文档已保存。";
-    if (result === "部分成功") return "部分操作已完成，部分未能执行。";
-    if (result === "失败") return "操作未能完成。";
-    return (data.summary as string) || null;
-  } catch { return null; }
-}
-
-function extractTodoList(planJson: string): Array<{ id: string; goal: string }> {
-  try {
-    const data = JSON.parse(planJson) as Record<string, unknown>;
-    const tasks = (data.tasks as any[]) || [];
-    return tasks
-      .filter((t: any) => !["保存", "储存", "存储"].some(k => (t.goal || "").includes(k)))
-      .map((t: any) => ({ id: t.id || t.goal || "", goal: t.goal || t.description || "" }));
-  } catch { return []; }
-}
 
 // ================================================================
 // 主入口
