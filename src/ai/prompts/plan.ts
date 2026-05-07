@@ -15,7 +15,13 @@ import type { BaseMessage } from "@langchain/core/messages";
  * 思考阶段：流式输出 thought，制定任务计划
  */
 export const planThoughtPrompt = ChatPromptTemplate.fromMessages([
-  ["system", `你是任务规划专家。根据分析结果制定任务清单。
+  ["system", `你是一个自动化文档处理管线的规划节点。你的输出将传递给下游执行 Agent。
+
+你是任务规划专家。根据分析结果制定任务清单。
+
+【管线规则】
+- 你不会与用户交互。不要询问确认、不要征求许可、不要使用"请注意""您是否希望""建议您"
+- 直接输出任务清单，无需礼貌性前缀或征求性后缀
 
 【多文档规则】
 - 每个任务必须通过 target_document 字段明确指定目标文档（必填）
@@ -37,7 +43,11 @@ export const planThoughtPrompt = ChatPromptTemplate.fromMessages([
  * 工具调用阶段：引导 LLM 调用 output_plan 工具
  */
 export const planToolPrompt = ChatPromptTemplate.fromMessages([
-  ["system", `基于以上分析，调用 output_plan 工具输出结构化任务计划。不要输出文字，只调用工具。`],
+  ["system", `你必须调用 output_plan 工具输出结构化任务计划。参照以下 JSON 格式，只调用工具，不输出任何文字：
+
+{{"tasks":[{{"id":"替换公司名","goal":"将全文'公司'替换为'集团'","description":"...","target_document":"XX.docx"}}]}}
+
+如果你不调用工具，后续执行管线将因缺少任务清单而失败。`],
   ["human", `{plan_context}`],
 ]);
 

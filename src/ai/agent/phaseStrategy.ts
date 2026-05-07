@@ -10,6 +10,8 @@ import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messag
 import { StructuredTool } from "@langchain/core/tools";
 import { sseThought } from "../core/sseEmitter";
 import { logLlmStreamStart, logLlmStreamFull, logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
+import { extractJson } from "../core/jsonExtractor";
+import { extractTasksFromMarkdown } from "../core/jsonExtractor";
 import { emitWarning } from "./phaseHelpers";
 
 // ================================================================
@@ -48,11 +50,11 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     toolContext: string
   ): AsyncGenerator<string, Record<string, unknown> | null, unknown> {
     // 第1次：流式输出 thought
+    let thoughtFull = "";
     let stream: AsyncIterable<unknown>;
     try {
       const endStreamLog = logLlmStreamStart("DualCall.thought (流式)");
       stream = await llm.stream(thoughtMessages);
-      let thoughtFull = "";
       const originalStream = stream;
       stream = (async function* () {
         for await (const chunk of originalStream as AsyncIterable<{ content: { toString(): string } }>) {
@@ -82,7 +84,7 @@ export class DualCallStrategy implements PhaseStreamStrategy {
     console.log("[phaseStrategy:" + this.name + "] 开始 tool calling, tool=" + outputTool.name);
     const endInvokeLog = logLlmInvokeStart("DualCall.bindTools (结构化)");
     try {
-      const llmWithTools = llm.bindTools([outputTool], { tool_choice: "required" });
+      const llmWithTools = llm.bindTools([outputTool]);
       const response = await llmWithTools.invoke([
         new SystemMessage(toolSystemMessage),
         new HumanMessage(toolContext),
@@ -98,7 +100,25 @@ export class DualCallStrategy implements PhaseStreamStrategy {
         return args as Record<string, unknown>;
       }
 
-      yield* emitWarning("Tool calling: LLM 未调用工具，返回 null");
+      // 兜底：从 thought 流全文中提取 JSON（LLM 可能在 thought 中输出结构化文本）
+      const rawJson = thoughtFull ? extractJson(thoughtFull) : "";
+      if (rawJson) {
+        try {
+          const fallback = JSON.parse(rawJson) as Record<string, unknown>;
+          console.log("[phaseStrategy:" + this.name + "] Tool calling 未调用工具，从 thought 提取 JSON 成功");
+          return fallback;
+        } catch {
+          console.warn("[phaseStrategy:" + this.name + "] thought JSON 解析失败");
+        }
+      }
+      // 二次兜底：从 Markdown 格式 thought 中提取任务清单
+      const mdFallback = thoughtFull ? extractTasksFromMarkdown(thoughtFull) : null;
+      if (mdFallback) {
+        console.log("[phaseStrategy:" + this.name + "] Tool calling 未调用工具，从 thought Markdown 提取任务成功");
+        return mdFallback;
+      }
+
+      yield* emitWarning("Tool calling: LLM 未调用工具且 thought 无有效 JSON，返回 null");
       return null;
     } catch (e: unknown) {
       endInvokeLog?.();

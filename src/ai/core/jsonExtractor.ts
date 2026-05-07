@@ -94,10 +94,52 @@ export function extractJson(text: string): string | null {
 }
 
 /**
- * 从文本中提取并解析 JSON
+ * 从 thought Markdown 文本中提取任务清单（extractJson 失败时的兜底）
  *
- * @param text - 原始文本
- * @returns 解析后的对象，失败时返回 null
+ * LLM 在 plan phase 的 thought 流中常输出 Markdown 格式：
+ *   1. **任务一：替换XX**
+ *      *   **目标文档**：文档A.docx
+ *      *   **操作说明**：将...改为...
+ *
+ * 此函数解析这种格式，生成 tasks 数组。
+ */
+export function extractTasksFromMarkdown(text: string): Record<string, unknown> | null {
+  try {
+    const tasks: Record<string, unknown>[] = [];
+    // 匹配 "N. **任务：XXX**" 或 "任务N：XXX"
+    const taskBlocks = text.split(/\n(?=\d+[.\)、]\s*(\*\*)?任务)/);
+    if (taskBlocks.length === 0) taskBlocks.push(text);
+
+    for (const block of taskBlocks) {
+      // 提取目标文档
+      const docMatch = block.match(/目标文档[：:]\s*([^\n*]+)/);
+      const targetDocument = docMatch ? docMatch[1].trim() : "";
+
+      // 提取操作说明
+      const goalMatch = block.match(/操作说明[：:]\s*([^\n]+)/) || block.match(/\*\*任务[^：:]*[：:]\s*([^*\n]+)/);
+      const goal = goalMatch ? goalMatch[1].trim() : "";
+      if (!goal && !targetDocument) continue;
+
+      const description = block.replace(/\*+/g, "").trim().slice(0, 200);
+      const id = (goal || targetDocument || "task").slice(0, 20);
+
+      tasks.push({
+        id,
+        goal: goal || targetDocument,
+        description,
+        target_document: targetDocument || undefined,
+      });
+    }
+
+    if (tasks.length === 0) return null;
+    return { tasks };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从文本中提取并解析 JSON
  */
 export function extractAndParseJson<T = Record<string, unknown>>(text: string): T | null {
   const json = extractJson(text);

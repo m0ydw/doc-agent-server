@@ -131,10 +131,18 @@ export function attachAgentWs(httpServer: Server): void {
 
             // ===== LLM token 流（逐 token 发送，前端累积渲染）=====
             case "on_chat_model_stream": {
-              const content = event.data?.chunk?.content || "";
+              let content = event.data?.chunk?.content || "";
               if (!content) break;
               const phase = event.metadata?.langgraph_node;
               const type = (phase === "generate" || phase === "execute") ? "content" : "thought";
+              // 后处理：过滤 execute 阶段泄露的工具名称和内部指令
+              if (type === "content" && phase === "execute") {
+                content = content
+                  .replace(/\b(task_complete|sdk_\w+|SDK\w+Tool)\b/g, "")
+                  .replace(/\b调用.*确认\b/g, "")
+                  .trim();
+                if (!content) break;
+              }
               send(ws, type, { content });
               break;
             }

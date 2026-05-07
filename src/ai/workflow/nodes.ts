@@ -115,23 +115,21 @@ export function createExecuteNode(llm: ChatOpenAI) {
     let cachedDocText = state.cachedDocText;
     const writer = getWriter(config);
 
-    // 按 target_document 分组（多文档支持）
-    // 无匹配文档时跳过该任务（不自动回退到当前文档）
-    const groups = new Map<string, unknown[]>();
+    // 逐 task 顺序执行（任务隔离，OpenCode 标准模式）
+    let taskIdx = 0;
     for (const task of planTasks) {
       const targetName = (task as Record<string, unknown>).target_document as string || "";
       const doc = targetName ? fileRegistry.getByName(targetName) : undefined;
-      if (!targetName || !doc) continue; // 跳过无目标或无法匹配的任务
-      if (!groups.has(doc.docId)) groups.set(doc.docId, []);
-      groups.get(doc.docId)!.push(task);
-    }
+      if (!targetName || !doc) {
+        allLogs.push(`[跳过] 任务缺少目标文档: ${JSON.stringify(task).slice(0, 100)}`);
+        continue;
+      }
+      const docEntry = fileRegistry.get(doc.docId);
+      const docLabel = docEntry ? `"${docEntry.originalName}" (${doc.docId.slice(0, 8)})` : doc.docId;
+      taskIdx++;
+      allLogs.push(`--- 任务 ${taskIdx}: ${(task as Record<string, unknown>).goal || ''} [${docLabel}] ---`);
 
-    // 逐文档执行任务组
-    for (const [docId, tasks] of groups) {
-      const docEntry = fileRegistry.get(docId);
-      const docLabel = docEntry ? `"${docEntry.originalName}" (${docId.slice(0, 8)})` : docId;
-
-      for await (const event of executeTasksStream(llm, docId, tasks)) {
+      for await (const event of executeTasksStream(llm, doc.docId, [task])) {
         switch (event.type) {
           case "tool_start": {
             const meta = getToolMetadataByName(event.tool!);

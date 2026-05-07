@@ -29,9 +29,6 @@ import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../services/editor";
 
-/** SDK 读取文本的最大字符数 */
-const SDK_GET_TEXT_MAX_CHARS = 2000;
-
 export interface SDKToolMetadata {
   /** 前端展示的中文名 */
   displayName: string;
@@ -112,8 +109,7 @@ export class SDKFindTextTool extends StructuredTool {
         return `未找到匹配"${input.pattern}"`;
       }
 
-      const summary = `找到 ${matches.length} 处匹配"${input.pattern}"：\n` +
-        matches.map((m, i) => `  ${i + 1}. "${m.text}"（位置索引: ${m.index}）`).join("\n");
+      const summary = `找到 ${matches.length} 处匹配"${input.pattern}"`;
 
       return summary;
     } catch (err: any) {
@@ -281,12 +277,7 @@ export class SDKGetTextTool extends StructuredTool {
         return "文档内容为空";
       }
 
-      // 截取前 SDK_GET_TEXT_MAX_CHARS 字符，避免 LLM 上下文过长
-      const excerpt = text.length > SDK_GET_TEXT_MAX_CHARS
-        ? text.slice(0, SDK_GET_TEXT_MAX_CHARS) + `\n\n...（共 ${text.length} 字符，仅显示前 ${SDK_GET_TEXT_MAX_CHARS}）`
-        : text;
-
-      return `文档全文（${text.length} 字符）：\n\n${excerpt}`;
+      return `文档全文（${text.length} 字符）`;
     } catch (err: any) {
       return `读取文档失败: ${err.message}`;
     }
@@ -342,7 +333,12 @@ export const SDK_TOOL_METADATA: Record<string, SDKToolMetadata> = {
 export function getToolMetadataByName(toolName: string): SDKToolMetadata {
   const meta = SDK_TOOL_METADATA[toolName];
   if (meta) return meta;
-
+  // 模糊匹配：on_tool_start 的 event.name 可能返回类名而非 tool.name
+  for (const key of Object.keys(SDK_TOOL_METADATA)) {
+    if (toolName.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(toolName.toLowerCase())) {
+      return SDK_TOOL_METADATA[key];
+    }
+  }
   console.warn("[sdkTools] 未注册的工具名: " + toolName);
   return {
     displayName: toolName,

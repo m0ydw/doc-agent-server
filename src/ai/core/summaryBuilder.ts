@@ -13,15 +13,17 @@ function buildAnalysisSummary(analysisJson: string): string | null {
       return `我先了解一下文档中关于「${ops[0]?.target || "相关内容"}」的信息。`;
     }
     if (ops.length === 0) return null;
-    const goals: string[] = ops.map((o: Record<string, unknown>) => {
-      const target = (o.target as string) || "";
+    const items: Array<{ goal: string; doc: string }> = ops.map((o: Record<string, unknown>) => {
+      const target = (o.target as string) || (o.target_document as string) || "";
       const goal = (o.goal as string) || "";
-      // target + goal 同时存在时拼接完整描述，例如："把「与绘」替换为七色"
-      if (target && goal) return `${goal.includes(target) ? "" : "把「" + target + "」"}${goal}`;
-      return goal || target || "";
-    }).filter(Boolean);
-    if (goals.length === 0) return null;
-    return `我需要${goals.join("，然后")}。`;
+      const doc = (o.target_document as string) || "";
+      if (target && goal) return { goal: `${goal.includes(target) ? "" : "把「" + target + "」" + goal}`, doc };
+      return { goal: goal || target || "", doc };
+    }).filter((i) => i.goal);
+    if (items.length === 0) return null;
+    // 多文档时每行标注目标文档，单文档简洁输出
+    if (items.every((i) => !i.doc)) return `我需要${items.map((i) => i.goal).join("，然后")}。`;
+    return `任务概览：\n${items.map((i) => (i.doc ? `  • ${i.doc}：${i.goal}` : `  • ${i.goal}`)).join("\n")}`;
   } catch {
     return null;
   }
@@ -34,7 +36,7 @@ function buildPlanSummary(planJson: string): string | null {
     if (tasks.length === 0) return null;
     const goals: string[] = tasks.map((t: Record<string, unknown>) => (t.goal || "") as string).filter(Boolean);
     if (goals.length === 0) return null;
-    return `执行步骤：${goals.map((g: string, i: number) => `${i + 1}) ${g}`).join("；")}。`;
+    return `执行步骤：\n${goals.map((g: string, i: number) => `${i + 1}) ${g}`).join("\n")}`;
   } catch {
     return null;
   }
