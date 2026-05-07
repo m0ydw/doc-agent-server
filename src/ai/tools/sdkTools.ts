@@ -334,7 +334,7 @@ export class SDKSaveTool extends StructuredTool {
   static metadata: SDKToolMetadata = {
     displayName: "保存更改",
     argsFormatter: () => "保存文档修改",
-    showInUI: false,
+    showInUI: true,
   };
 
   schema = z.object({
