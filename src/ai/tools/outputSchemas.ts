@@ -65,6 +65,8 @@ export const PlanOutputSchema = z.object({
     id: z.string().describe("任务简短描述作为ID，如'替换公司名'，不使用task-1这种编号"),
     goal: z.string().describe("任务的一句话目标，如'将全文公司替换为集团'"),
     description: z.string().describe("详细描述要完成的任务"),
+    target_document: z.string().optional()
+      .describe("目标文档名称（从可用文档列表中选择）。如果任务针对特定文档，必须指定此字段"),
     constraints: z.array(z.string()).optional()
       .describe("执行约束，如'全文档范围内替换'、'不替换作为词组一部分的文字'"),
     success_criteria: z.string().optional()

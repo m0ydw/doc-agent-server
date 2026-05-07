@@ -48,14 +48,13 @@ export const EXECUTION_STYLE_EXAMPLES = {
     "在文档中搜索'公司'，找到 5 处匹配",
     "将所有'公司'替换为'集团'，已完成 5 处替换",
     "在文档中搜索'web软件'，未找到相关内容",
-    "已保存文档修改",
-    "所有操作已完成",
+    "所有操作已完成，无需显式保存（协作模式自动同步）",
+    "已确认任务执行完成",
   ],
   /** LLM 不应该输出的风格 */
   bad: [
     "调用 sdk_find_text({pattern:'公司'}) 返回 5 个结果",
     "task-1 执行成功，sdk_replace_all 返回 code=0",
-    "sdk_find_text 失败，error: Pattern not found",
-    "调用 sdk_save() 保存文档",
+    "sdk_replace_all 失败，error: Pattern not found",
   ],
 };

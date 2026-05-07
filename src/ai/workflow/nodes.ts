@@ -29,50 +29,40 @@ import { fileRegistry } from "../../services/fileRegistry";
 import { AgentState } from "./state";
 
 /* ============================================================== */
-/*  docTarget 节点                                                */
-/* ============================================================== */
-
-export function createDocTargetNode(_llm: ChatOpenAI, _strategy: PhaseStreamStrategy) {
-  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
-    const userInput = state.userInput;
-    const contextDocId = state.docId;
-    const allDocs = fileRegistry.getAll();
-    const docContext = fileRegistry.toContextString(contextDocId);
-
-    let targetDocId: string | undefined;
-    if (allDocs.length === 1) targetDocId = allDocs[0].docId;
-    else {
-      for (const doc of allDocs) {
-        if (userInput.includes(doc.originalName)) { targetDocId = doc.docId; break; }
-        if (userInput.includes(doc.originalName.replace(/\.\w+$/, ""))) { targetDocId = doc.docId; break; }
-      }
-      targetDocId = targetDocId || (contextDocId && fileRegistry.get(contextDocId) ? contextDocId : allDocs[0]?.docId);
-    }
-
-    if (!targetDocId) throw new Error("无法确定目标文档");
-
-    return {
-      docId: targetDocId,
-      docContext,
-      targetDocName: fileRegistry.get(targetDocId)?.originalName || targetDocId,
-      relatedMemory: await retrieveMemory(targetDocId, userInput),
-    };
-  };
-}
-
-/* ============================================================== */
-/*  analyze 节点                                                   */
+/*  analyze 节点（含文档定位）                                    */
 /* ============================================================== */
 
 export function createAnalyzeNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
   return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    // 文档定位（原 docTarget 节点逻辑内联）
+    const allDocs = fileRegistry.getAll();
+    let targetDocId = state.docId;
+    const docContext = fileRegistry.toContextString(targetDocId);
+
+    if (!targetDocId || !fileRegistry.get(targetDocId)) {
+      if (allDocs.length === 1) targetDocId = allDocs[0].docId;
+      else {
+        for (const doc of allDocs) {
+          if (state.userInput.includes(doc.originalName)) { targetDocId = doc.docId; break; }
+          if (state.userInput.includes(doc.originalName.replace(/\.\w+$/, ""))) { targetDocId = doc.docId; break; }
+        }
+        targetDocId = targetDocId || allDocs[0]?.docId || "";
+      }
+    }
+
+    if (!targetDocId) throw new Error("无法确定目标文档");
+
+    const targetDocName = fileRegistry.get(targetDocId)?.originalName || targetDocId;
+    const relatedMemory = await retrieveMemory(targetDocId, state.userInput);
+
+    // 分析阶段
     const { thoughtMessages, toolSystemMessage, toolContext } =
       await buildAnalyzePhase({
         classification_rules: CLASSIFICATION_RULES,
         anti_leak_rules: ANTI_LEAK_RULES,
         user_input: state.userInput,
-        doc_context: state.docContext,
-        related_memory: state.relatedMemory,
+        doc_context: docContext,
+        related_memory: relatedMemory,
       });
 
     const gen = strategy.execute(llm, thoughtMessages, new AnalysisOutputTool(), toolSystemMessage, toolContext);
@@ -80,7 +70,13 @@ export function createAnalyzeNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy
     while (!r.done) r = await gen.next();
     const analysisObj = r.value || {};
 
-    return { analysis: JSON.stringify(analysisObj) };
+    return {
+      docId: targetDocId,
+      docContext,
+      targetDocName,
+      relatedMemory,
+      analysis: JSON.stringify(analysisObj),
+    };
   };
 }
 
@@ -114,40 +110,58 @@ export function createPlanNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
 export function createExecuteNode(llm: ChatOpenAI) {
   return async (state: typeof AgentState.State, config?: RunnableConfig) => {
     const planTasks = (() => { try { return JSON.parse(state.planJson).tasks || []; } catch { return []; } })();
-    let executionLog = "";
-    let executeSuccess: boolean | null = null;
+    let allLogs: string[] = [];
+    let overallSuccess: boolean | null = null;
     let cachedDocText = state.cachedDocText;
     const writer = getWriter(config);
 
-    for await (const event of executeTasksStream(llm, state.docId, planTasks)) {
-      switch (event.type) {
-        case "tool_start": {
-          const meta = getToolMetadataByName(event.tool!);
-          if (!meta.showInUI) continue;
-          let rawArgs: Record<string, unknown> = {};
-          if (event.args) { try { rawArgs = JSON.parse(event.args); } catch { rawArgs = {}; } }
-          writer?.({ type: "tool_start", data: { tool: meta.displayName, args: meta.argsFormatter(rawArgs) } });
-          break;
-        }
-        case "tool_result": {
-          const meta = getToolMetadataByName(event.tool!);
-          if (!meta.showInUI) continue;
-          writer?.({ type: "tool_result", data: { success: event.status === "success", tool: meta.displayName, result: event.result || "完成" } });
-          if (event.tool === "sdk_get_text" && event.status === "success" && event.result) {
-            const m = event.result.match(/：(.+)/);
-            cachedDocText = m ? m[1] : event.result;
+    // 按 target_document 分组（多文档支持）
+    // 无匹配文档时跳过该任务（不自动回退到当前文档）
+    const groups = new Map<string, unknown[]>();
+    for (const task of planTasks) {
+      const targetName = (task as Record<string, unknown>).target_document as string || "";
+      const doc = targetName ? fileRegistry.getByName(targetName) : undefined;
+      if (!targetName || !doc) continue; // 跳过无目标或无法匹配的任务
+      if (!groups.has(doc.docId)) groups.set(doc.docId, []);
+      groups.get(doc.docId)!.push(task);
+    }
+
+    // 逐文档执行任务组
+    for (const [docId, tasks] of groups) {
+      const docEntry = fileRegistry.get(docId);
+      const docLabel = docEntry ? `"${docEntry.originalName}" (${docId.slice(0, 8)})` : docId;
+
+      for await (const event of executeTasksStream(llm, docId, tasks)) {
+        switch (event.type) {
+          case "tool_start": {
+            const meta = getToolMetadataByName(event.tool!);
+            if (!meta.showInUI) continue;
+            let rawArgs: Record<string, unknown> = {};
+            if (event.args) { try { rawArgs = JSON.parse(event.args); } catch { rawArgs = {}; } }
+            writer?.({ type: "tool_start", data: { tool: meta.displayName, args: meta.argsFormatter(rawArgs), doc: docLabel } });
+            break;
           }
-          break;
-        }
-        case "done": {
-          executionLog = event.executionLog || "";
-          executeSuccess = event.success ?? null;
-          break;
+          case "tool_result": {
+            const meta = getToolMetadataByName(event.tool!);
+            if (!meta.showInUI) continue;
+            writer?.({ type: "tool_result", data: { success: event.status === "success", tool: meta.displayName, result: event.result || "完成", doc: docLabel } });
+            if (event.tool === "sdk_get_text" && event.status === "success" && event.result) {
+              const m = event.result.match(/：(.+)/);
+              cachedDocText = m ? m[1] : event.result;
+            }
+            break;
+          }
+          case "done": {
+            allLogs.push(`[文档 ${docLabel}] ${event.executionLog || ""}`);
+            if (overallSuccess === null) overallSuccess = event.success ?? null;
+            else if (event.success === false) overallSuccess = false;
+            break;
+          }
         }
       }
     }
 
-    return { executionLog, cachedDocText, success: executeSuccess === true };
+    return { executionLog: allLogs.join("\n"), cachedDocText, success: overallSuccess === true };
   };
 }
 
@@ -181,6 +195,11 @@ export function createGenerateNode(llm: ChatOpenAI) {
 
 export function createValidateNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
   return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    // 代码层预判：executeNode 已确认全部成功，跳过 LLM 判定
+    if (state.success) {
+      return { validateJson: "{}", success: true, retryable: false, needsUserInput: false, retryCount: state.retryCount + 1 };
+    }
+
     const { thoughtMessages, toolSystemMessage, toolContext } =
       await buildValidatePhase({
         anti_leak_rules: ANTI_LEAK_RULES,

@@ -18,6 +18,11 @@ import type { BaseMessage } from "@langchain/core/messages";
 export const analyzeThoughtPrompt = ChatPromptTemplate.fromMessages([
   ["system", `你是文档需求分析专家。区分用户的真实意图。
 
+【多文档规则】
+- 用户可能同时操作多个文档。分析时请为每个文档列出独立的 operation
+- 每个 operation 必须包含 target_document 字段，值为「当前可用文档」列表中的文档名
+- 无法确定目标文档时，标注 needs_clarification: true
+
 【意图分类】
 {classification_rules}
 

@@ -57,7 +57,6 @@ interface ClientMessage {
 // ================================================================
 
 const NODE_LABELS: Record<string, string> = {
-  docTarget: "正在定位目标文档...",
   analyze: "正在分析您的需求...",
   plan: "正在制定执行计划...",
   execute: "正在处理文档...",
@@ -135,7 +134,7 @@ export function attachAgentWs(httpServer: Server): void {
               const content = event.data?.chunk?.content || "";
               if (!content) break;
               const phase = event.metadata?.langgraph_node;
-              const type = (phase === "generate") ? "content" : "thought";
+              const type = (phase === "generate" || phase === "execute") ? "content" : "thought";
               send(ws, type, { content });
               break;
             }
@@ -157,10 +156,6 @@ export function attachAgentWs(httpServer: Server): void {
               const output = event.data?.output as Record<string, unknown> | undefined;
 
               // ★ 节点特定事件
-              if (nodeName === "docTarget" && output?.targetDocName) {
-                send(ws, "doc_target", { fileName: output.targetDocName as string });
-              }
-
               if (nodeName === "analyze" && output?.analysis) {
                 const summary = buildAnalysisSummary(output.analysis as string);
                 if (summary) send(ws, "content", { content: summary });

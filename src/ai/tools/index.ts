@@ -24,7 +24,6 @@ export {
   SDKReplaceTextTool,
   SDKReplaceAllTool,
   SDKGetTextTool,
-  SDKSaveTool,
   SDKTaskCompleteTool,
   getToolMetadata,
   SDK_TOOL_METADATA,

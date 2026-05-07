@@ -1,6 +1,7 @@
 import express, { Request, Response, Router } from "express";
 import multer, { FileFilterCallback } from "multer";
 import path from "path";
+import fs from "fs/promises";
 import config from "../config";
 import {
   saveDocument,
@@ -215,44 +216,7 @@ router.post("/:id/open", async (req: Request, res: Response) => {
 });
 
 /**
- * 下载文档（如果磁盘文件还存在）
- */
-router.get("/:id", async (req: Request, res: Response) => {
-  try {
-    const id = getParamId(req);
-
-    // 加入协作房间
-    await sessionManager.ensureYjsRoom(id);
-
-    const result = await getDocumentFile(id);
-
-    if (!result) {
-      // 文档可能只有 Yjs 状态，没有磁盘文件
-      return res.status(404).json({ error: "文件不存在或已被清理" });
-    }
-
-      const filePath = result.filePath;
-    const metadata = result.metadata;
-
-    res.setHeader(
-      "Content-Type",
-      metadata.mimeType ||
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      "attachment; filename=\"" + encodeURIComponent(metadata.originalName) + "\""
-    );
-
-    res.sendFile(filePath);
-  } catch (error) {
-    console.error("下载文件失败:", error);
-    res.status(500).json({ error: "下载文件失败" });
-  }
-});
-
-/**
- * 获取文件原始内容（供前端播种用），保留源文件
+ * 获取文件原始内容（供前端播种用），发送完成后删除磁盘文件
  */
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
@@ -263,8 +227,7 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-      const filePath = result.filePath;
-    const metadata = result.metadata;
+    const { filePath, metadata } = result;
 
     res.setHeader(
       "Content-Type",
@@ -275,8 +238,10 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
     );
 
-    // 仅发送文件，不再删除源文件（后续 SDK 会话复用）
-    res.sendFile(filePath);
+    // 发送完成后删除磁盘文件（Yjs 协作模式已持有完整内容）
+    res.sendFile(filePath, () => {
+      fs.unlink(filePath).catch(() => {});
+    });
   } catch (error) {
     console.error("获取种子文件失败:", error);
     res.status(500).json({ error: "获取种子文件失败" });

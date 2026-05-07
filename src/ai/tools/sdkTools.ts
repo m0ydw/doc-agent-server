@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ================================================================
  * SDK Tools — LangChain StructuredTool 子工具集
  * ================================================================
@@ -16,15 +16,6 @@
  *   sdk_replace_text  → editor.replaceFirst() → doc.mutations.apply(text.rewrite)
  *   sdk_replace_all   → editor.replaceAll()   → doc.mutations.apply(text.rewrite)
  *   sdk_get_text      → editor.getText()      → doc.getText()
- *   sdk_save          → 通过 sessionManager 获取 doc → doc.save()
- *
- * 【调用链】
- *   LLM (tool calling) → StructuredTool._call() → editor.xxx() → sessionManager → SDK API
- *
- * 【改进项 4 - 工具显示名动态化】
- *   每个工具类携带 static metadata（displayName / argsFormatter / showInUI），
- *   替代 globalAgent.ts 中硬编码的 TOOL_DISPLAY 字典。
- *   Agent 运行时通过 getToolMetadata() 动态读取。
  *
  * 【设计原则】
  *   1. 每个工具只做一件事（单一职责）
@@ -37,20 +28,10 @@
 import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../services/editor";
-import * as sessionManager from "../../services/session";
 
-/** SDK 读取文档时返回给 LLM 的最大字符数 */
+/** SDK 读取文本的最大字符数 */
 const SDK_GET_TEXT_MAX_CHARS = 2000;
 
-// ================================================================
-// 工具 metadata 类型（改进项 4）
-// ================================================================
-
-/**
- * SDK 工具的 metadata
- * 每个工具类通过 static metadata 携带显示信息，
- * 替代 globalAgent.ts 中硬编码的 TOOL_DISPLAY 字典。
- */
 export interface SDKToolMetadata {
   /** 前端展示的中文名 */
   displayName: string;
@@ -59,7 +40,7 @@ export interface SDKToolMetadata {
   /**
    * 是否在 UI 中展示该工具调用
    * - true:  正常展示（如 sdk_find_text、sdk_replace_text）
-   * - false: 隐藏（如 sdk_save，内部操作无需展示）
+   * - false: 隐藏（如 task_complete，内部信号无需展示）
    */
   showInUI: boolean;
 }
@@ -313,58 +294,7 @@ export class SDKGetTextTool extends StructuredTool {
 }
 
 // ================================================================
-// 5. sdk_save — 保存文档
-// ================================================================
-
-/**
- * 保存文档的当前状态
- *
- * 【SDK 调用映射】
- *   通过 sessionManager 获取 doc 对象 → doc.save()
- *
- * 【LLM 使用场景】
- *   - 所有操作完成后持久化保存
- *   - 在协作模式下，修改会自动同步，save 是显式确认
- */
-export class SDKSaveTool extends StructuredTool {
-  name = "sdk_save";
-  description = "保存文档的所有修改。在所有操作完成后调用此工具确认保存";
-
-  /** metadata（改进项 4）: showInUI=false 替代原来的硬编码跳过逻辑 */
-  static metadata: SDKToolMetadata = {
-    displayName: "保存更改",
-    argsFormatter: () => "保存文档修改",
-    showInUI: true,
-  };
-
-  schema = z.object({
-    // 不需要额外的参数
-  });
-
-  private docId: string;
-
-  constructor(docId: string) {
-    super();
-    this.docId = docId;
-  }
-
-  async _call(_input: z.infer<typeof this.schema>): Promise<string> {
-    try {
-      // 通过 sessionManager 获取当前文档的会话
-      const { doc } = await sessionManager.createOrUseSession(this.docId);
-      await doc.save({});
-      return "文档已保存";
-    } catch (err: any) {
-      // 协作模式下可能自动保存，save 失败不一定是错误
-      return `保存完成（协作模式自动同步）`;
-    }
-  }
-}
-
-// ================================================================
-// 6. task_complete — 执行完成信号（LLM 主动声明确认结束）
-// ================================================================
-
+// 5. task_complete — 执行完成信号（LLM 主动声明确认结束）
 /**
  * task_complete — 终结工具
  *
@@ -402,7 +332,6 @@ export const SDK_TOOL_METADATA: Record<string, SDKToolMetadata> = {
   [new SDKReplaceTextTool("").name]: SDKReplaceTextTool.metadata,
   [new SDKReplaceAllTool("").name]:  SDKReplaceAllTool.metadata,
   [new SDKGetTextTool("").name]:     SDKGetTextTool.metadata,
-  [new SDKSaveTool("").name]:        SDKSaveTool.metadata,
   [new SDKTaskCompleteTool().name]:  SDKTaskCompleteTool.metadata,
 };
 

@@ -55,7 +55,7 @@ import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
-import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKSaveTool, SDKTaskCompleteTool } from "./sdkTools";
+import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKTaskCompleteTool } from "./sdkTools";
 import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
 import { extractAndParseJson } from "../core/jsonExtractor";
 import { logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
@@ -125,7 +125,6 @@ const TOOL_DESCRIPTIONS = [
   { name: "sdk_find_text(文本)", description: "查找指定文本在文档中的位置" },
   { name: "sdk_replace_text(目标, 替换)", description: "替换第一个匹配的文本" },
   { name: "sdk_replace_all(目标, 替换)", description: "替换全部匹配的文本" },
-  { name: "sdk_save()", description: "保存文档修改" },
 ];
 
 async function buildExecuteSystemMessage(): Promise<SystemMessage> {
@@ -198,7 +197,7 @@ export class ExecuteTool extends StructuredTool<typeof ExecuteInputSchema> {
     for await (const event of executeTasksStream(this.llm, docId, planTasks)) {
       if (event.type === "tool_start" || event.type === "tool_result") {
         // 收集工具调用记录（保持 _call 返回 JSON 的兼容性）
-        if (event.type === "tool_result" && event.tool !== "sdk_save") {
+        if (event.type === "tool_result" && event.tool !== "task_complete") {
           toolCalls.push({
             tool: event.tool!,
             args: "", // 从 tool_start 已获取，简化处理
@@ -259,7 +258,6 @@ export async function* executeTasksStream(
     new SDKReplaceTextTool(docId),
     new SDKReplaceAllTool(docId),
     new SDKGetTextTool(docId),
-    new SDKSaveTool(docId),
     new SDKTaskCompleteTool(),
   ];
 
@@ -271,7 +269,7 @@ export async function* executeTasksStream(
     new HumanMessage(
       `请按以下任务清单操作文档（文档ID: ${docId}）：\n\n` +
       JSON.stringify(planTasks, null, 2) +
-      `\n\n请逐个执行任务，每完成一步告诉我结果。所有任务完成后调用 sdk_save。`
+      `\n\n请逐个执行任务，每完成一步告诉我结果。所有任务完成后调用 task_complete。`
     ),
   ];
 
@@ -305,6 +303,11 @@ export async function* executeTasksStream(
         const tool = sdkTools.find(t => t.name === toolName);
         if (!tool) {
           log.push(`[Execute] 未知工具: ${toolName}`);
+          // 必须回 ToolMessage，否则下一次 LLM 调用会因 tool_call_id 缺失而报错
+          messages.push(new ToolMessage({
+            content: `未知工具: ${toolName}（该工具不可用）`,
+            tool_call_id: toolId!,
+          }));
           continue;
         }
 
@@ -320,7 +323,7 @@ export async function* executeTasksStream(
           const resultStr = typeof result === "string" ? result : JSON.stringify(result);
           log.push(`[工具] ${toolName}(${JSON.stringify(toolArgs)}) → ${resultStr.slice(0, 200)}`);
 
-          if (toolName !== "sdk_save") {
+          if (toolName !== "task_complete") {
             toolCalls.push({
               tool: toolName,
               args: JSON.stringify(toolArgs),
@@ -384,17 +387,7 @@ export async function* executeTasksStream(
     }
   }
 
-  // 确保保存
-  try {
-    const saveTool = sdkTools.find(t => t.name === "sdk_save");
-    if (saveTool) {
-      await saveTool.invoke({});
-      log.push(`[Execute] 文档已保存`);
-    }
-  } catch {
-    log.push(`[Execute] 保存失败（可能已在协作中自动保存）`);
-  }
-
+  // Yjs 协作模式自动同步，无需显式保存
   const success = Object.values(taskStatus).every(s => s === "success") && planTasks.length > 0;
 
   // ★ yield done 事件（携带执行日志和成功状态）

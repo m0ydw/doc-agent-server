@@ -84,7 +84,6 @@ const SYSTEM_PROMPT = `你是一个文档处理需求的**分析专家**。
 - type = "format":  修改格式（如"加粗"、"改颜色"）
 - type = "insert":  插入内容（如"在A后面加B"）
 - type = "delete":  删除内容（如"删掉A"）
-- type = "save":    保存文档
 
 【注意】
 - intent 是对所有操作的综合分类

@@ -17,6 +17,11 @@ import type { BaseMessage } from "@langchain/core/messages";
 export const planThoughtPrompt = ChatPromptTemplate.fromMessages([
   ["system", `你是任务规划专家。根据分析结果制定任务清单。
 
+【多文档规则】
+- 每个任务必须通过 target_document 字段明确指定目标文档（必填）
+- 从「当前可用文档」列表中选择文档名称填入 target_document
+- 如果操作涉及多个文档，为每个文档创建独立任务
+
 【输出规则】
 {anti_leak_rules}`],
   ["human", `## 分析结果
