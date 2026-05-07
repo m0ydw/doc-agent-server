@@ -4,10 +4,11 @@
  * ================================================================
  *
  * 【标准流式映射】
- *   streamMode: ["messages", "custom"]
- *   - "messages" → on_chat_model_stream → 实时逐字 LLM tokens (thought/content)
- *   - "custom"   → on_custom_event        → 实时工具调用 (tool_start/result)
- *   - on_chain_end (始终触发)             → 阶段结束 + 对话式摘要 + 最终结果
+ *   streamMode: ["messages"]
+ *   - "messages"       → on_chat_model_stream → 实时逐字 LLM tokens (thought/content)
+ *   - on_tool_start    → LangGraph 内置 → 实时工具调用开始
+ *   - on_tool_end      → LangGraph 内置 → 实时工具调用结果
+ *   - on_chain_end     → 阶段结束 + 对话式摘要 + 最终结果
  *
  * 【WebSocket 消息协议（Server → Client）】
  *   { type: "phase_start",  data: { phase: "analyze" } }
@@ -32,6 +33,7 @@ import { getGlobalAgent } from "../agent/globalAgent";
 import config from "../../config";
 import { logger } from "../../app";
 import { buildAnalysisSummary, buildPlanSummary, buildValidateSummary, extractTodoList } from "./summaryBuilder";
+import { getToolMetadataByName } from "../tools/sdkTools";
 
 const PORT = config.PORT;
 
@@ -119,7 +121,7 @@ export function attachAgentWs(httpServer: Server): void {
       try {
         const stream = graph.streamEvents(
           { userInput: data.message || "", docId: data.docId || "", maxRetry: 3, retryCount: 0 },
-          { version: "v2", streamMode: ["messages", "custom"], signal: abortController.signal }
+          { version: "v2", streamMode: ["messages"], signal: abortController.signal }
         );
 
         let currentPhase: string | null = null;
@@ -193,7 +195,39 @@ export function attachAgentWs(httpServer: Server): void {
               break;
             }
 
-            // ===== 工具事件（实时）=====
+            // ===== 工具事件：LangGraph 内置 on_tool_start / on_tool_end（标准） =====
+            case "on_tool_start": {
+              const toolName = event.name || "";
+              const toolInput = event.data?.input;
+              const meta = getToolMetadataByName(toolName);
+              if (meta?.showInUI) {
+                const args = typeof toolInput === "string"
+                  ? toolInput
+                  : JSON.stringify(toolInput || {});
+                send(ws, "tool_start", {
+                  tool: meta.displayName,
+                  args: meta.argsFormatter(toolInput as Record<string, unknown> || {}),
+                });
+              }
+              break;
+            }
+
+            case "on_tool_end": {
+              const toolName = event.name || "";
+              const output = event.data?.output;
+              const meta = getToolMetadataByName(toolName);
+              if (meta?.showInUI) {
+                const result = typeof output === "string" ? output : JSON.stringify(output || "");
+                send(ws, "tool_result", {
+                  success: true,
+                  tool: meta.displayName,
+                  result,
+                });
+              }
+              break;
+            }
+
+            // ===== 自定义事件（writer 发射，保留兼容） =====
             case "on_custom_event": {
               const custom = event.data as Record<string, unknown> | undefined;
               if (custom?.type) {
