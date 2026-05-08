@@ -33,4 +33,9 @@ export const AgentState = Annotation.Root({
   success: Annotation<boolean>({ value: override, default: () => false }),
   retryable: Annotation<boolean>({ value: override, default: () => true }),
   needsUserInput: Annotation<boolean>({ value: override, default: () => false }),
+
+  // ========== Plan 校验 ==========
+  planValid: Annotation<boolean>({ value: override, default: () => true }),
+  planErrorContext: Annotation<string>({ value: override, default: () => "" }),
+  planRetries: Annotation<number>({ value: override, default: () => 0 }),
 });

@@ -29,6 +29,13 @@ export const CLASSIFICATION_RULES = [
   "  示例：'这个项目写了一个什么web软件？' 是查询，不是替换操作！",
   "修改操作 → intent=text_replace 或 format_change",
   "  特征词：替换、修改、删除、插入、加粗、改成、换成、删掉、去掉、添加",
+  "凭空创建 → intent=content_create, task_type=create_new",
+  "  特征词：编一个、新建、创造一个、起一个、写一个、虚构、杜撰、假设一个",
+  "  示例：'根据模板编一个项目' → 创建新数据，不是从已有文档搬运！",
+  "提取搬运 → task_type=extract_and_fill",
+  "  特征词：根据XXX填表、从A复制到B、参照A填写B",
+  "用户提供数据+参考模板 → task_type=template_fill_with_given_data",
+  "  特征词：用户给出了具体值（姓名=XXX、电话=XXX）且提到空白表/模板 → 用户已提供完整数据，只需参考模板格式填入，不需要从参考文档提取数据！",
   "混合 → intent=mixed（既有查询又有修改）",
 ].join("\n");
 

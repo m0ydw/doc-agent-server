@@ -13,7 +13,7 @@
 
 import { ChatOpenAI } from "@langchain/openai";
 import { RunnableConfig } from "@langchain/core/runnables";
-import { BaseMessage } from "@langchain/core/messages";
+import { BaseMessage, HumanMessage } from "@langchain/core/messages";
 import { getWriter } from "@langchain/langgraph";
 import type { PhaseStreamStrategy } from "../agent/phaseStrategy";
 import { executeTasksStream } from "../tools/executeTool";
@@ -100,6 +100,50 @@ export function createPlanNode(llm: ChatOpenAI, strategy: PhaseStreamStrategy) {
     const planObj = r.value || { tasks: [] };
 
     return { planJson: JSON.stringify(planObj) };
+  };
+}
+
+/* ============================================================== */
+/*  validate_plan 节点（Plan 生成后校验）                           */
+/* ============================================================== */
+
+export function createValidatePlanNode(llm: ChatOpenAI) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig) => {
+    // 解析分析结果，提取 task_type
+    let taskType = "";
+    try { taskType = (JSON.parse(state.analysis) as Record<string, unknown>).task_type as string || ""; } catch { /* */ }
+
+    const prompt = `校验以下计划是否匹配用户原始需求：
+
+用户需求: ${state.userInput}
+任务类型(LLM判定): ${taskType || "未指定"}
+生成的计划: ${state.planJson}
+先前错误: ${state.planErrorContext || "无"}
+
+回答三个问题:
+1. 计划是否与用户原始需求一致？
+2. 如果 task_type 是 "create_new" 或 "template_fill_with_given_data"，计划中是否错误地包含了从其他文档提取信息的任务？
+3. 如果用户原始输入包含了明确的键值对数据（如姓名=XXX），计划中不应包含"从参考文档提取"的步骤——用户已经提供了数据，只需参考模板格式
+4. 每个任务是否在当前可用文档(${state.docContext})范围内可执行？
+
+输出 JSON: {"valid": true/false, "reason": "简短原因", "suggested_fix": "修正建议"}`;
+
+    try {
+      const response = await llm.invoke([new HumanMessage(prompt)]);
+      const text = response.content.toString();
+      const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as Record<string, unknown>;
+      const valid = json.valid !== false;
+      const reason = (json.reason as string) || "";
+
+      return {
+        planValid: valid,
+        planErrorContext: reason,
+        planRetries: state.planRetries + 1,
+        needsUserInput: !valid && state.planRetries >= 1,
+      };
+    } catch {
+      return { planValid: true, planRetries: state.planRetries + 1 };
+    }
   };
 }
 

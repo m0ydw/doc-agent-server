@@ -23,8 +23,11 @@ import { z } from "zod";
 
 export const AnalysisOutputSchema = z.object({
   /** 用户需求的总体意图分类 */
-  intent: z.enum(["content_query", "text_replace", "format_change", "mixed", "other"])
-    .describe("意图类型：content_query=内容查询/总结/提问, text_replace=文本替换, format_change=格式修改, mixed=混合, other=其他"),
+  intent: z.enum(["content_query", "text_replace", "format_change", "mixed", "other", "content_create"])
+    .describe("意图类型：content_query=内容查询/总结/提问, text_replace=文本替换, format_change=格式修改, mixed=混合, other=其他, content_create=凭空创建新内容/编造新数据"),
+  /** 任务性质分类：LLM 判定的任务类型 */
+  task_type: z.enum(["create_new", "modify_existing", "extract_and_fill", "template_fill_with_given_data"]).optional()
+    .describe("create_new=生成全新内容, modify_existing=修改已有文档, extract_and_fill=从某文档提取信息填入另一文档, template_fill_with_given_data=用户已提供完整数据+参考模板格式"),
   /** 识别出的所有操作意图 */
   operations: z.array(z.object({
     type: z.enum(["query", "replace", "format", "insert", "delete", "save"])

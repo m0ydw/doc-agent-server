@@ -55,7 +55,7 @@ import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import { ChatOpenAI } from "@langchain/openai";
 import { SystemMessage, HumanMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
-import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKTaskCompleteTool, SDKSetTextTool, SDKApplyFormatTool, SDKGetStructureTool } from "./sdkTools";
+import { SDKFindTextTool, SDKReplaceTextTool, SDKReplaceAllTool, SDKGetTextTool, SDKTaskCompleteTool, SDKSetTextTool, SDKApplyFormatTool, SDKGetStructureTool, SDKFindCellTool, SDKReadTableTool } from "./sdkTools";
 import { executeSystemPrompt, buildToolList, EXECUTION_STYLE_RULES } from "../prompts";
 import { extractAndParseJson } from "../core/jsonExtractor";
 import { logLlmInvokeStart, logLlmInvokeResult } from "../core/debugLogger";
@@ -122,11 +122,13 @@ export interface ExecuteToolEvent {
 // ================================================================
 const TOOL_DESCRIPTIONS = [
   { name: "sdk_get_text()", description: "读取文档全文" },
-  { name: "sdk_get_structure()", description: "提取文档结构（表格/段落位置），填表前必调" },
+  { name: "sdk_get_structure()", description: "提取文档结构（表格/段落/单元格位置），填表前必调" },
+  { name: "sdk_find_cell(文本)", description: "在表格中查找含指定文本的单元格（如'姓名'），返回 ref 供写入" },
   { name: "sdk_find_text(文本)", description: "查找指定文本在文档中的位置" },
   { name: "sdk_replace_text(目标, 替换)", description: "替换第一个匹配的文本" },
   { name: "sdk_replace_all(目标, 替换)", description: "替换全部匹配的文本" },
-  { name: "sdk_set_text(ref, 内容)", description: "在指定位置写入文本，保留原格式（填表核心工具）" },
+  { name: "sdk_read_table(索引)", description: "★★★ 读取表格结构地图，返回 JSON（行列坐标+写入ref）。ref 可直接传给 sdk_set_text 写入。填表第一步必调，只需调一次" },
+  { name: "sdk_set_text(ref, 内容)", description: "★★★ 在指定位置写入文本。ref 来自 sdk_read_table 返回的 cells[].ref。如果任务描述中已有具体数据值，直接调用此工具写入，不要再去其他文档查找" },
   { name: "sdk_apply_format(文本, 粗体?, 斜体?)", description: "对指定文本应用格式（加粗/斜体/下划线）" },
 ];
 
@@ -264,6 +266,8 @@ export async function* executeTasksStream(
     new SDKSetTextTool(docId),
     new SDKApplyFormatTool(docId),
     new SDKGetStructureTool(docId),
+    new SDKFindCellTool(docId),
+    new SDKReadTableTool(docId),
     new SDKTaskCompleteTool(),
   ];
 
@@ -283,8 +287,30 @@ export async function* executeTasksStream(
   const toolCalls: ToolCallRecord[] = [];
   let taskStatus: Record<string, "success" | "failed" | "skipped"> = {};
 
+  // ===== L3 防护状态 =====
+  const toolCallMap = new Map<string, number>(); // toolName|args → count
+  let lastReadRound = -1;  // 最后一次 readTable 的轮次
+  let writeCount = 0;      // sdk_set_text 调用次数
+  let guardInjected = { maxCalls: false, repeat: false, writeAfterRead: false };
+
   // tool calling 循环
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    // ===== L3 防护：注入系统消息（LLM 可见） =====
+    // 1. maxToolCalls — 超过 25 步时提示 LLM 尽快结束
+    if (round >= 25 && !guardInjected.maxCalls) {
+      messages.push(new SystemMessage("你已执行 25 步工具调用，请立即调用 task_complete 结束本轮执行。"));
+      guardInjected.maxCalls = true;
+    }
+
+    // 2. writeAfterRead — readTable 后 10 步内无写入
+    if (lastReadRound >= 0 && (round - lastReadRound) > 10 && writeCount === 0 && !guardInjected.writeAfterRead) {
+      messages.push(new SystemMessage(
+        "你已调用 sdk_read_table 获取了表格结构，但尚未调用 sdk_set_text 写入任何数据。" +
+        "请立即使用 cells[].ref 调用 sdk_set_text 填入用户提供的数据。"
+      ));
+      guardInjected.writeAfterRead = true;
+    }
+
     const endInvokeLog = logLlmInvokeStart(`ExecuteTool.round${round + 1}`);
     const response = await llmWithTools.invoke(messages);
     logLlmInvokeResult(`ExecuteTool.round${round + 1}`, response.content?.toString() || null, response.tool_calls);
@@ -357,6 +383,33 @@ export async function* executeTasksStream(
             content: resultStr,
             tool_call_id: toolId!,
           }));
+
+          // ===== L3 防护：记录工具调用 =====
+          // 1. 同工具+同参数计数
+          const argsSig = JSON.stringify(toolArgs || {});
+          const callKey = `${toolName}|${argsSig}`;
+          toolCallMap.set(callKey, (toolCallMap.get(callKey) || 0) + 1);
+
+          // 2. readTable 轮次记录
+          if (toolName === "sdk_read_table") {
+            lastReadRound = round;
+            guardInjected.writeAfterRead = false; // 新一轮 readTable 重置防护
+          }
+
+          // 3. sdk_set_text 计数
+          if (toolName === "sdk_set_text") {
+            writeCount++;
+            guardInjected.writeAfterRead = false; // 有写入，重置防护
+          }
+
+          // 4. 同工具重复防护（3 次以上注入提示）
+          const callCount = toolCallMap.get(callKey) || 0;
+          if (callCount >= 3 && !guardInjected.repeat) {
+            messages.push(new SystemMessage(
+              `${toolName} 已重复调用 ${callCount} 次且结果相同，请换用其他工具或调用 task_complete 结束。`
+            ));
+            guardInjected.repeat = true;
+          }
         } catch (err: any) {
           const errMsg = `[工具] ${toolName} 执行失败: ${err.message}`;
           log.push(errMsg);

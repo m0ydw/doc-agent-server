@@ -59,6 +59,7 @@ interface ClientMessage {
 const NODE_LABELS: Record<string, string> = {
   analyze: "正在分析您的需求...",
   plan: "正在制定执行计划...",
+  validate_plan: "正在校验计划...",
   execute: "正在处理文档...",
   generate: "正在生成回答...",
   validate: "正在验证结果...",

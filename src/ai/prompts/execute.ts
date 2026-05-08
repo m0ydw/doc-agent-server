@@ -20,6 +20,12 @@ export const executeSystemPrompt = ChatPromptTemplate.fromMessages([
 - 遇到失败调整参数重试，3次失败后跳过该任务
 - 全部操作完成后调用 task_complete() 确认完成
 
+【数据写入规则】
+- 如果任务描述中已包含具体数据值，直接使用这些值写入，不要再去其他文档查找
+- sdk_read_table 返回的 cells[].ref 可直接传给 sdk_set_text 写入，无需二次查找
+- 读取表格/文档结构只需调用一次对应工具，拿到结果后立即开始写入
+- 禁止对同一查询反复调用 find_text / get_text 超过 2 次
+
 【输出风格】
 {execution_style_rules}
 

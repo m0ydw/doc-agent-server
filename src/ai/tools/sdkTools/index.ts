@@ -13,6 +13,8 @@ export { SDKTaskCompleteTool } from "./sdkTaskCompleteTool";
 export { SDKSetTextTool } from "./sdkSetTextTool";
 export { SDKApplyFormatTool } from "./sdkApplyFormatTool";
 export { SDKGetStructureTool } from "./sdkGetStructureTool";
+export { SDKFindCellTool } from "./sdkFindCellTool";
+export { SDKReadTableTool } from "./sdkReadTableTool";
 
 import { SDKFindTextTool } from "./sdkFindTextTool";
 import { SDKReplaceTextTool } from "./sdkReplaceTextTool";
@@ -22,6 +24,8 @@ import { SDKTaskCompleteTool } from "./sdkTaskCompleteTool";
 import { SDKSetTextTool } from "./sdkSetTextTool";
 import { SDKApplyFormatTool } from "./sdkApplyFormatTool";
 import { SDKGetStructureTool } from "./sdkGetStructureTool";
+import { SDKFindCellTool } from "./sdkFindCellTool";
+import { SDKReadTableTool } from "./sdkReadTableTool";
 import type { SDKToolMetadata } from "./sdkToolTypes";
 
 /** 统一 metadata 映射表 */
@@ -34,14 +38,18 @@ export const SDK_TOOL_METADATA: Record<string, SDKToolMetadata> = {
   [new SDKSetTextTool("").name]:       SDKSetTextTool.metadata,
   [new SDKApplyFormatTool("").name]:   SDKApplyFormatTool.metadata,
   [new SDKGetStructureTool("").name]:  SDKGetStructureTool.metadata,
+  [new SDKFindCellTool("").name]:      SDKFindCellTool.metadata,
+  [new SDKReadTableTool("").name]:     SDKReadTableTool.metadata,
 };
 
 /** 根据工具名获取 metadata（精确匹配 + 模糊匹配兜底） */
 export function getToolMetadataByName(toolName: string): SDKToolMetadata {
   const meta = SDK_TOOL_METADATA[toolName];
   if (meta) return meta;
+  // 模糊匹配：仅对 sdk_ 前缀的工具名去下划线比较
+  const norm = (s: string) => s.toLowerCase().replace(/_/g, "");
   for (const key of Object.keys(SDK_TOOL_METADATA)) {
-    if (toolName.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(toolName.toLowerCase())) {
+    if (key.startsWith("sdk_") && (norm(toolName).includes(norm(key)) || norm(key).includes(norm(toolName)))) {
       return SDK_TOOL_METADATA[key];
     }
   }

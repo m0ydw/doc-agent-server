@@ -78,6 +78,13 @@ export interface Document {
   mutations: {
     apply: (params: any) => Promise<any>;
   };
+  tables: {
+    get: (params: any) => Promise<any>;
+    getCells: (params: any) => Promise<any>;
+  };
+  blocks: {
+    list: (params: any) => Promise<any>;
+  };
 }
 
 async function openDocument(params: OpenParams): Promise<Document> {

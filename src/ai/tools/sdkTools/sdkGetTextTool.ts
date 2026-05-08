@@ -18,7 +18,8 @@ export class SDKGetTextTool extends StructuredTool {
     try {
       const text = await editor.getText(this.docId);
       if (!text || text.length === 0) return "文档内容为空";
-      return `文档全文（${text.length} 字符）`;
+      console.log("[GET_TEXT] 全文(" + text.length + "字符):\n" + text);
+      return text;
     } catch (err: unknown) { return `读取文档失败: ${(err as Error).message}`; }
   }
 }
