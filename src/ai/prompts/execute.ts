@@ -22,9 +22,12 @@ export const executeSystemPrompt = ChatPromptTemplate.fromMessages([
 
 【数据写入规则】
 - 如果任务描述中已包含具体数据值，直接使用这些值写入，不要再去其他文档查找
+- 如果用户提供了"参考文档"（如与绘.docx），它仅供格式/布局参考——参考文档中已有的数据是旧数据，不能复制到目标文档。必须使用用户明确提供的数据值
+- 目标文档中的空白字段应该用用户提供的数据填充，不是用参考文档的旧数据填充
 - sdk_read_table 返回的 cells[].ref 可直接传给 sdk_set_text 写入，无需二次查找
 - 读取表格/文档结构只需调用一次对应工具，拿到结果后立即开始写入
 - 禁止对同一查询反复调用 find_text / get_text 超过 2 次
+- 禁止在用户已完整提供所有数据项后，仍报告"缺少信息"并停止执行
 
 【输出风格】
 {execution_style_rules}

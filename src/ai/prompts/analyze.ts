@@ -28,6 +28,13 @@ export const analyzeThoughtPrompt = ChatPromptTemplate.fromMessages([
 - 创建新内容时，operation 的 type 也应为"replace"（擦除空白格模板文本），但 task_type 必须是 create_new
 - 如果用户消息中包含明确的数据项（姓名=XXX、电话=XXX、项目名=XXX），并提到参考模板/空白表 → task_type=template_fill_with_given_data（不提取，直接填入用户数据）
 
+【关键区分：参考文档 vs 数据源】
+- "根据已填好的XX表格来填空白表格" → XX文档是**格式/结构模板**，不是数据源。表格里的旧数据属于其他项目，不能复制到空白表中
+- "参照XX的格式"、"按照XX的位置和格式" → 仅参考格式布局，数据以用户直接提供的为准
+- 用户同时提供参考文档名 + 完整新数据 → 参考文档仅供定位单元格/段落位置，里面的文字内容与当前任务**无关**
+- **反例**：用户说"根据已填好的与绘.docx填空白表"，同时给出了项目名称=XXX、成员=XXX → 与绘.docx只用于查看表格有几行几列、标签在哪里，**绝不提取**与绘.docx中的文字内容作为数据来源
+- 当判断为 template_fill_with_given_data 时，在 context_hints 中标注"参考文档仅供格式参考，数据来自用户输入"
+
 【多文档规则】
 - 用户可能同时操作多个文档。分析时请为每个文档列出独立的 operation
 - 每个 operation 必须包含 target_document 字段，值为「当前可用文档」列表中的文档名
