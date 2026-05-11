@@ -1,38 +1,22 @@
 /**
  * ================================================================
- * wsAgentHandler — WebSocket Agent 处理器（LangGraph 标准模式）
+ * wsAgentHandler — WebSocket Agent 处理器（多 Agent 架构）
+ *
+ * 支持 LangGraph Supervisor 模式的流式事件。
+ * 节点事件映射到前端 WebSocket 协议。
  * ================================================================
- *
- * 【标准流式映射】
- *   streamMode: ["messages"]
- *   - "messages"       → on_chat_model_stream → 实时逐字 LLM tokens (thought/content)
- *   - on_tool_start    → LangGraph 内置 → 实时工具调用开始
- *   - on_tool_end      → LangGraph 内置 → 实时工具调用结果
- *   - on_chain_end     → 阶段结束 + 对话式摘要 + 最终结果
- *
- * 【WebSocket 消息协议（Server → Client）】
- *   { type: "phase_start",  data: { phase: "analyze" } }
- *   { type: "phase_status", data: { text: "正在分析您的需求..." } }
- *   { type: "thought",      data: { content: "逐字流式思考..." } }
- *   { type: "content",      data: { content: "逐字流式回答..." } }
- *   { type: "phase_end",    data: { phase: "analyze" } }
- *   { type: "tool_start",   data: { tool: "搜索文本", args: "搜索 "公司"" } }
- *   { type: "tool_result",  data: { success: true, tool: "搜索文本", result: "找到3处" } }
- *   { type: "doc_target",   data: { fileName: "文档.docx" } }
- *   { type: "todo_list",    data: { tasks: [...] } }
- *   { type: "summary",      data: { result: "success", summary_text: "✅", detail: "", failed_tasks: [] } }
- *   { type: "done",         data: { id: "msg-1" } }
  */
 
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import { ChatOpenAI } from "@langchain/openai";
-import type { PhaseStreamStrategy } from "../agent/phaseStrategy";
+import type { RunnableConfig } from "@langchain/core/runnables";
+import { createParser } from "eventsource-parser";
+import type { EventSourceMessage } from "eventsource-parser";
 import { createWorkflow } from "../workflow/graph";
 import { getGlobalAgent } from "../agent/globalAgent";
 import config from "../../config";
 import { logger } from "../../app";
-import { buildAnalysisSummary, buildPlanSummary, buildValidateSummary, extractTodoList } from "./summaryBuilder";
 import { getToolMetadataByName } from "../tools/sdkTools";
 
 const PORT = config.PORT;
@@ -57,13 +41,24 @@ interface ClientMessage {
 // ================================================================
 
 const NODE_LABELS: Record<string, string> = {
-  analyze: "正在分析您的需求...",
-  plan: "正在制定执行计划...",
-  validate_plan: "正在校验计划...",
-  execute: "正在处理文档...",
-  generate: "正在生成回答...",
-  validate: "正在验证结果...",
+  orchestrator: "正在分析任务...",
+  doc_analyst: "正在分析文档结构...",
+  surgical_editor: "正在执行编辑...",
+  template_filler: "正在填充数据...",
+  reviewer: "正在验证结果...",
 };
+
+// ================================================================
+// Writer 机制：允许节点发送自定义事件（兼容占位）
+// ================================================================
+
+/**
+ * 从 RunnableConfig 中获取 writer 函数
+ * 当前返回 no-op，节点通过标准 LangGraph 事件机制通信。
+ */
+export function getWriter(_config?: RunnableConfig): ((event: { type: string; data?: Record<string, unknown> }) => void) | undefined {
+  return undefined;
+}
 
 // ================================================================
 // 主入口
@@ -72,7 +67,7 @@ const NODE_LABELS: Record<string, string> = {
 export function attachAgentWs(httpServer: Server): void {
   const wss = new WebSocketServer({ server: httpServer, path: "/ws/agent" });
   const addr = httpServer.address();
-  const port = addr && typeof addr === 'object' ? addr.port : PORT;
+  const port = addr && typeof addr === "object" ? addr.port : PORT;
   logger.info("[AgentWS] 已启动: ws://localhost:" + port + "/ws/agent");
 
   wss.on("connection", (ws: WebSocket) => {
@@ -85,7 +80,6 @@ export function attachAgentWs(httpServer: Server): void {
         send(ws, "error", { message: "无效的 JSON 消息" }); return;
       }
       if (msg.type === "cancel") {
-        // 取消当前请求
         currentAbortController?.abort();
         currentAbortController = null;
         return;
@@ -100,9 +94,8 @@ export function attachAgentWs(httpServer: Server): void {
       }
 
       const llm = agent.currentLlm;
-      const strategy = agent.currentStrategy;
-      if (!llm || !strategy) {
-        send(ws, "error", { message: "Agent LLM/策略未初始化" });
+      if (!llm) {
+        send(ws, "error", { message: "Agent LLM 未初始化" });
         send(ws, "done", { id: msg.id });
         return;
       }
@@ -113,34 +106,38 @@ export function attachAgentWs(httpServer: Server): void {
         return;
       }
 
-      // ===== LangGraph 工作流（标准 streamMode）=====
+      // ===== 多 Agent 工作流 =====
       const abortController = new AbortController();
       currentAbortController = abortController;
-      const graph = createWorkflow(llm, strategy);
+      const graph = createWorkflow(llm);
 
       try {
         const stream = graph.streamEvents(
-          { userInput: data.message || "", docId: data.docId || "", maxRetry: 3, retryCount: 0 },
-          { version: "v2", streamMode: ["messages"], signal: abortController.signal }
+          {
+            userInput: data.message || "",
+            docId: data.docId || "",
+            maxRetry: 3,
+            retryCount: 0,
+          },
+          {
+            version: "v2",
+            streamMode: ["messages"] as const,
+            signal: abortController.signal,
+          }
         );
 
-        let currentPhase: string | null = null;
-
         for await (const event of stream) {
-
           switch (event.event) {
 
-            // ===== LLM token 流（逐 token 发送，前端累积渲染）=====
+            // ===== LLM token 流 =====
             case "on_chat_model_stream": {
               let content = event.data?.chunk?.content || "";
               if (!content) break;
               const phase = event.metadata?.langgraph_node;
-              const type = (phase === "generate" || phase === "execute") ? "content" : "thought";
-              // 后处理：过滤 execute 阶段泄露的工具名称和内部指令
-              if (type === "content" && phase === "execute") {
+              const type = (phase === "generate" || phase === "surgical_editor") ? "content" : "thought";
+              if (type === "content" && (phase === "surgical_editor" || phase === "template_filler")) {
                 content = content
                   .replace(/\b(task_complete|sdk_\w+|SDK\w+Tool)\b/g, "")
-                  .replace(/\b调用.*确认\b/g, "")
                   .trim();
                 if (!content) break;
               }
@@ -152,54 +149,81 @@ export function attachAgentWs(httpServer: Server): void {
             case "on_chain_start": {
               const nodeName = event.name;
               if (NODE_LABELS[nodeName]) {
-                currentPhase = nodeName;
-                send(ws, "phase_status", { text: NODE_LABELS[nodeName] });
                 send(ws, "phase_start", { phase: nodeName });
+                send(ws, "phase_status", { text: NODE_LABELS[nodeName] });
               }
               break;
             }
 
-            // ===== 节点结束 → 阶段摘要 + 最终结果 =====
+            // ===== 节点结束 =====
             case "on_chain_end": {
               const nodeName = event.name;
               const output = event.data?.output as Record<string, unknown> | undefined;
 
-              // ★ 节点特定事件
-              if (nodeName === "analyze" && output?.analysis) {
-                const summary = buildAnalysisSummary(output.analysis as string);
-                if (summary) send(ws, "content", { content: summary });
+              if (nodeName === "orchestrator" && output?.analysis) {
+                try {
+                  const analysis = JSON.parse(output.analysis as string);
+                  send(ws, "content", { content: `分析完成：${analysis.intent || "未知"}，委派 ${analysis.agentPlan?.length || 0} 个 Agent。` });
+                } catch (e) { console.warn("[AgentWS] orchestrator JSON 解析失败:", (e as Error).message); }
               }
 
-              if (nodeName === "plan" && output?.planJson) {
-                const summary = buildPlanSummary(output.planJson as string);
-                if (summary) send(ws, "content", { content: summary });
-                const todos = extractTodoList(output.planJson as string);
-                if (todos.length > 0) send(ws, "todo_list", { tasks: todos });
+              if (nodeName === "doc_analyst" && output?.documentMaps) {
+                try {
+                  const maps = JSON.parse(output.documentMaps as string);
+                  if (maps.length > 0 && maps[0].tables?.length > 0) {
+                    const labels = maps[0].tables.flatMap((t: Record<string, unknown>) => (t.labels as unknown[]) || []);
+                    send(ws, "content", { content: `文档结构分析完成，发现 ${maps[0].tables[0]?.cells?.length || 0} 个单元格，${labels.length} 个标签字段。` });
+                  }
+                } catch (e) { console.warn("[AgentWS] doc_analyst documentMaps 解析失败:", (e as Error).message); }
               }
 
-              if (nodeName === "validate") {
-                if (output?.validateJson) {
-                  const summary = buildValidateSummary(output.validateJson as string);
-                  if (summary) send(ws, "content", { content: summary });
-                }
-                // 发射最终 summary（基于实际验证结果）
-                const success = output?.success === true;
-                const needsUserInput = output?.needsUserInput === true;
-                const retryable = output?.retryable !== false;
+              // TemplateFiller：从 fieldMappings 发送工具事件（纯确定性节点，不产生 LangGraph tool events）
+              if (nodeName === "template_filler" && output?.fieldMappings) {
+                try {
+                  const mappings = JSON.parse(output.fieldMappings as string) as Array<{
+                    fieldName: string; userValue: string; status: string; errorReason?: string;
+                  }>;
+                  for (const m of mappings) {
+                    if (m.status === "written") {
+                      send(ws, "tool_start", { tool: "写入文本", args: `写入 "${m.fieldName}"` });
+                      send(ws, "tool_result", { success: true, tool: "写入文本", result: `${m.fieldName}: ${m.userValue}` });
+                    } else if (m.status === "blocked") {
+                      send(ws, "tool_start", { tool: "写入文本", args: `写入 "${m.fieldName}"` });
+                      send(ws, "tool_result", { success: false, tool: "写入文本", result: m.errorReason || "数据守卫拦截" });
+                    }
+                  }
+                } catch (e) { console.warn("[AgentWS] template_filler fieldMappings 解析失败:", (e as Error).message); }
+              }
+
+              if (nodeName === "reviewer" && output?.diffReport) {
+                try {
+                  const report = JSON.parse(output.diffReport as string);
+                  const icon = report.result === "pass" ? "✅" : report.result === "partial" ? "⚠️" : "❌";
+                  send(ws, "content", { content: `${icon} ${report.summary || "验证完成"}` });
+                  send(ws, "summary", {
+                    result: report.result === "pass" ? "success" : "partial",
+                    summary_text: `${icon} ${report.summary || ""}`,
+                    detail: JSON.stringify(report.details || []),
+                    failed_tasks: [],
+                  });
+                } catch (e) { console.warn("[AgentWS] reviewer diffReport 解析失败:", (e as Error).message); }
+              }
+
+              if (output?.success !== undefined && output?.lastAgent === "SurgicalEditor") {
+                send(ws, "content", { content: output.success ? "✅ 编辑完成" : "⚠️ 编辑完成，部分操作可能未成功" });
                 send(ws, "summary", {
-                  result: success ? "success" : needsUserInput ? "intervention" : retryable ? "retry" : "failed",
-                  summary_text: success ? "✅ 所有任务执行完成" : "⚠️ 需要关注",
+                  result: output.success ? "success" : "partial",
+                  summary_text: output.success ? "✅ 编辑完成" : "⚠️ 编辑完成",
                   detail: "",
                   failed_tasks: [],
                 });
               }
 
-              // 发送 phase_end
               if (nodeName) send(ws, "phase_end", { phase: nodeName });
               break;
             }
 
-            // ===== 工具事件：LangGraph 内置 on_tool_start / on_tool_end（标准） =====
+            // ===== 工具开始 =====
             case "on_tool_start": {
               const toolName = event.name || "";
               const toolInput = event.data?.input;
@@ -216,6 +240,7 @@ export function attachAgentWs(httpServer: Server): void {
               break;
             }
 
+            // ===== 工具结束 =====
             case "on_tool_end": {
               const toolName = event.name || "";
               const output = event.data?.output;
@@ -231,7 +256,7 @@ export function attachAgentWs(httpServer: Server): void {
               break;
             }
 
-            // ===== 自定义事件（writer 发射，保留兼容） =====
+            // ===== 自定义事件（writer 发射）=====
             case "on_custom_event": {
               const custom = event.data as Record<string, unknown> | undefined;
               if (custom?.type) {
@@ -242,8 +267,12 @@ export function attachAgentWs(httpServer: Server): void {
           }
         }
       } catch (e: any) {
-        send(ws, "error", { message: e.message || "Agent 执行失败" });
-        send(ws, "summary", { result: "failed", summary_text: "❌ 执行出错", detail: e.message, failed_tasks: [] });
+        if (e.name === "AbortError") {
+          send(ws, "content", { content: "操作已取消。" });
+        } else {
+          send(ws, "error", { message: e.message || "Agent 执行失败" });
+          send(ws, "summary", { result: "failed", summary_text: "❌ 执行出错", detail: e.message, failed_tasks: [] });
+        }
       }
 
       send(ws, "done", { id: msg.id });
@@ -251,6 +280,7 @@ export function attachAgentWs(httpServer: Server): void {
 
     ws.on("close", () => {
       currentAbortController?.abort();
+      currentAbortController = null;
       logger.info("[AgentWS] 已断开");
     });
   });
@@ -276,10 +306,25 @@ function handleChatMode(ws: WebSocket, msg: ClientMessage) {
   }
 }
 
+/**
+ * 使用标准 eventsource-parser 解析 SSE 流并转换为 WebSocket JSON 消息发送。
+ */
 async function processStream(stream: AsyncGenerator<string, void, unknown>, ws: WebSocket, msgId: string) {
+  const parser = createParser({
+    onEvent(event: EventSourceMessage) {
+      if (!event.event || !event.data) return;
+      try {
+        const parsed = JSON.parse(event.data);
+        send(ws, event.event, parsed);
+      } catch {
+        console.warn("[AgentWS] SSE 帧 JSON 解析失败:", event.data.slice(0, 80));
+      }
+    },
+  });
+
   for await (const chunk of stream) {
     if (ws.readyState !== WebSocket.OPEN) break;
-    ws.send(chunk);
+    parser.feed(chunk);
   }
   send(ws, "done", { id: msgId });
 }

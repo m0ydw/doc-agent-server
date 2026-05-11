@@ -1,23 +1,19 @@
 /**
  * ================================================================
- * GlobalAgent — 全局 LLM Agent（LangGraph 实现）
+ * GlobalAgent — 全局 LLM Agent（多 Agent 架构）
+ *
+ * 职责：
+ *   1. LLM 实例管理（初始化、配置、重置）
+ *   2. Chat 模式（文档问答）
+ *   3. 状态查询
+ *
+ * 多 Agent 工作流由 wsAgentHandler → createWorkflow(graph) 独立管理。
  * ================================================================
- *
- * 【架构】
- *   WebSocket → wsAgentHandler → graph.streamEvents(["messages","custom"])
- *   → on_chat_model_stream → thought/content token 流
- *   → on_chain_end → 阶段摘要 + 最终结果
- *   → on_custom_event → 工具调用生命周期
- *
- *   所有流式输出由 LangGraph 标准 streamEvents 驱动，无手搓循环。
  */
 
 import { ChatOpenAI } from "@langchain/openai";
-import { SystemMessage, HumanMessage, BaseMessage } from "@langchain/core/messages";
 import { createChatModel } from "../core/llm";
 import type { LLMProvider } from "../core/llm";
-import { createPhaseStrategy } from "./phaseStrategy";
-import type { PhaseStreamStrategy } from "./phaseStrategy";
 import { sseToolStart, sseToolResult, sseError, sseDocTarget, sseSummary, sseChat } from "../core/sseEmitter";
 import { chatSystemPrompt, LANGUAGE_RULES } from "../prompts";
 import { clearMemories, getMemories } from "../core/memory";
@@ -27,9 +23,6 @@ import editor from "../../services/editor";
 // ================================================================
 // 配置
 // ================================================================
-
-/** 最大重试次数 */
-const MAX_RETRY = 3;
 
 const MAX_DOC_CONTEXT_CHARS = 4000;
 
@@ -54,7 +47,6 @@ export interface ProcessParams {
 class GlobalAgent {
   private llm: ChatOpenAI | null = null;
   private initialized = false;
-  private phaseStrategy: PhaseStreamStrategy | null = null;
 
   get isInitialized(): boolean {
     return this.initialized && this.llm !== null;
@@ -62,10 +54,6 @@ class GlobalAgent {
 
   get currentLlm(): ChatOpenAI | null {
     return this.llm;
-  }
-
-  get currentStrategy(): PhaseStreamStrategy | null {
-    return this.phaseStrategy;
   }
 
   initialize(config?: GlobalAgentConfig): void {
@@ -77,7 +65,6 @@ class GlobalAgent {
       return;
     }
 
-    // 使用统一的标准 provider 推断（与 createChatModelFromEnv 一致）
     let provider: LLMProvider = config?.provider || "zhipu";
     if (!config?.provider) {
       if (process.env.DEEPSEEK_API_KEY && apiKey === process.env.DEEPSEEK_API_KEY) provider = "deepseek";
@@ -91,24 +78,21 @@ class GlobalAgent {
       modelKwargs: config?.modelKwargs,
     });
 
-    this.phaseStrategy = createPhaseStrategy(modelName);
     this.initialized = true;
-    console.log("[GlobalAgent] 初始化完成 (LangGraph): provider=" + provider +
-                ", model=" + (modelName || "default") +
-                ", strategy=" + this.phaseStrategy.name);
+    console.log("[GlobalAgent] 初始化完成: provider=" + provider + ", model=" + (modelName || "default"));
   }
 
   reinitialize(config?: GlobalAgentConfig): void {
-    this.llm = null; this.phaseStrategy = null; this.initialized = false;
+    this.llm = null; this.initialized = false;
     this.initialize(config);
   }
 
   // ============================================================
-  // Chat 模式
+  // Chat 模式（文档问答）
   // ============================================================
 
   private async *runChatMode(
-    docId: string, docName: string, userInput: string, _docContext: string
+    docId: string, docName: string, userInput: string,
   ): AsyncGenerator<string, void, unknown> {
     yield sseToolStart("读取文档", "获取文档内容");
     let docText = "";
@@ -138,10 +122,9 @@ class GlobalAgent {
   }
 
   // ============================================================
-  // 核心：LangGraph 工作流
+  // 流式处理入口
   // ============================================================
 
-  // 内容查询 → Chat 模式（预检分类：仅当纯查询意图时提前分流，减少 LLM 消耗）
   private isContentQuery(userInput: string): boolean {
     const CONTENT_RE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
     const MODIFY_RE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
@@ -149,7 +132,7 @@ class GlobalAgent {
   }
 
   async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
-    if (!this.initialized || !this.llm || !this.phaseStrategy) {
+    if (!this.initialized || !this.llm) {
       yield sseError("Agent 未初始化，请先配置 API Key");
       return;
     }
@@ -163,22 +146,20 @@ class GlobalAgent {
       const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
       if (!targetDocId) { yield sseError("无法确定目标文档"); return; }
       yield sseDocTarget(fileRegistry.get(targetDocId)?.originalName || targetDocId);
-      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput, "");
+      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput);
       return;
     }
 
-    // 内容查询 → Chat 模式（预处理，最终分类由 LLM analyze 节点确认）
+    // 内容查询 → 按 Chat 模式处理
     if (this.isContentQuery(userInput)) {
       const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
       if (!targetDocId) { yield sseError("无法确定目标文档"); return; }
       yield sseDocTarget(fileRegistry.get(targetDocId)?.originalName || targetDocId);
-      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput, "");
+      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput);
       return;
     }
 
-    // ============ Workflow 模式 → 由 WebSocket handler 处理 ============
-    // streamProcess 仅用于 Chat 模式（WebSocket handler 中调用）。
-    // Workflow 模式通过 wsAgentHandler.ts 直接使用 createWorkflow + streamEvents。
+    // Workflow 模式 → 由 wsAgentHandler 通过 createWorkflow 处理
     yield sseError("Workflow 模式请通过 WebSocket 使用");
   }
 

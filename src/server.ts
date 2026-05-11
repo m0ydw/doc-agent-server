@@ -19,6 +19,18 @@ app.use("/api/docs", docRoutes);
 app.use("/api/doc-operations", docOperationsRoutes);
 
 // ================================================================
+// AI Agent REST API 路由
+// ================================================================
+
+import { getAgentStatus, resetAgent, setAgentConfig } from "./ai/service/aiService";
+
+const aiRouter = express.Router();
+aiRouter.get("/agent/status", getAgentStatus);
+aiRouter.post("/agent/reset", resetAgent);
+aiRouter.post("/agent/config", setAgentConfig);
+app.use("/api/ai", aiRouter);
+
+// ================================================================
 // 启动 HTTP 服务
 // ================================================================
 

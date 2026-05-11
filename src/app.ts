@@ -4,6 +4,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { Writable } from "stream";
+import config from "./config";
 
 // ================================================================
 // 日志 — 自定义轻量 pretty-print（Windows 终端编码友好）
@@ -48,10 +49,11 @@ const app: Express = express();
 // 安全头
 app.use(helmet());
 
-// CORS（开发环境允许所有来源，生产环境应配置白名单）
+// CORS（开发环境允许常见来源，生产环境通过 CORS_ORIGINS 环境变量配置白名单）
+const FRONTEND_PORT = process.env.FRONTEND_PORT || "5173";
 const allowedOrigins = process.env.CORS_ORIGINS?.split(",") || [
-  "http://localhost:5173",
-  "http://localhost:3000",
+  `http://localhost:${FRONTEND_PORT}`,
+  `http://localhost:${config.PORT}`,
 ];
 app.use(
   cors({
@@ -61,10 +63,10 @@ app.use(
   })
 );
 
-// 速率限制
+// 速率限制（可通过环境变量调整）
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 分钟
-  max: 120, // 最多 120 次请求
+  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 60 * 1000,
+  max: Number(process.env.RATE_LIMIT_MAX) || 120,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: "请求过于频繁，请稍后重试" },
@@ -94,9 +96,5 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
   logger.info({ method: req.method, url: req.url }, "请求");
   next();
 });
-
-// AI 路由
-import aiRoutes from "./routes/aiRoutes";
-app.use("/api/ai", aiRoutes);
 
 export default app;

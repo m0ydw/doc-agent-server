@@ -20,7 +20,7 @@
 export type SseEventType =
   | "thought"
   | "content"
-  | "chat"
+  | "chat_content"
   | "phase_start"
   | "phase_end"
   | "phase_status"
@@ -54,7 +54,7 @@ export const ssePhaseEnd = (phase: string) => sse("phase_end", { phase });
 export const ssePhaseStatus = (text: string) => sse("phase_status", { text });
 export const sseThought = (content: string) => sse("thought", { content });
 export const sseContent = (content: string) => sse("content", { content });
-export const sseChat = (content: string) => sse("chat", { content });
+export const sseChat = (content: string) => sse("chat_content", { content });
 export const sseDocTarget = (fileName: string) => sse("doc_target", { fileName });
 export const sseToolStart = (tool: string, args: string) => sse("tool_start", { tool, args });
 export const sseToolResult = (success: boolean, tool: string, result: string) =>
