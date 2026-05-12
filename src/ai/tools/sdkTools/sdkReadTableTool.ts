@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKReadTableTool — 读取文档中指定表格的完整结构
+ *
+ * 【使用的 Agent 节点】DocAnalyst（主用）、Reviewer（验证）
+ * 【底层调用】editor.readTable(docId, tableIndex)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

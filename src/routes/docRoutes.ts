@@ -1,3 +1,7 @@
+// 文档管理路由 — 负责文件上传/列表/打开/种子/信息/删除/清理
+// 上传流程：multer 解析 → 解码文件名 → 保存磁盘 + 元数据 → 注册到文件映射表 → 返回协作信息
+// 设计原则：上传只存盘不连接协作（延迟加载），用户打开时才建立 Yjs 房间连接
+
 import express, { Request, Response, Router } from "express";
 import multer, { FileFilterCallback } from "multer";
 import path from "path";
@@ -18,7 +22,9 @@ import { registerDocument, unregisterDocument } from "../services/fileRegistry";
 const router: Router = express.Router();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
 
-// ===== 文件名解码 =====
+// 文件名解码 — 处理前端通过特殊编码方式发送的文件名（如 UTF-8 二进制编码）
+// 两层解码逻辑：先尝试 decodeURIComponent，失败则使用 Buffer 从 binary 转 utf8
+// 为什么需要这个：部分中文字符在 HTTP header 中会因编码不匹配而损坏
 function decodeFilename(filename: string): string {
   if (!filename) return filename;
   try {
@@ -31,13 +37,13 @@ function decodeFilename(filename: string): string {
   }
 }
 
-// ===== 辅助函数 =====
-
-/** Express 5.x 中 req.params.id 可能返回 string | string[] */
+// Express 5.x 兼容：req.params.id 可能返回 string | string[]，统一转为 string
 function getParamId(req: Request): string {
   return String(req.params.id);
 }
 
+// 为文档元数据附加协作房间信息 — 前端编辑器需要 roomName/wsUrl 来连接协作服务
+// 如果 metadata 中已有 roomName 则使用已有值，否则用 docId 作为默认房间名
 function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: string; wsUrl: string }) {
   const roomName = roomInfo?.roomName || document.roomName || document.id;
   const wsUrl = roomInfo?.wsUrl || COLLAB_WS_URL;
@@ -53,22 +59,19 @@ function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: st
   };
 }
 
-// ===== 路由 =====
-
-/**
- * 清理文档
- */
+// 批量清理文档 — 关闭所有 SDK 会话后删除磁盘文件
+// keepIds 是保留白名单，不在白名单中的文档都会被删除
+// 删除后重新初始化文件注册表，确保注册表与实际文件一致
 router.post("/cleanup", async (req: Request, res: Response) => {
   try {
     const { keepIds } = req.body;
     if (!Array.isArray(keepIds)) {
       return res.status(400).json({ error: "keepIds 必须是数组" });
     }
-    // 关闭所有 SDK 会话
+    // 清理前必须先关闭所有会话，释放 SDK 文件句柄
     await sessionManager.closeAllSessions();
-    // 清理磁盘文件
     const deleted = await cleanupDocuments(keepIds);
-    // 重新初始化文件映射表（cleanup 后重新扫描）
+    // 重新扫描 uploads 目录重建注册表，保证后续操作的数据一致性
     const { initFileRegistry } = await import("../services/fileRegistry");
     initFileRegistry();
     res.json({ success: true, message: "清理完成", deleted: deleted });
@@ -78,7 +81,9 @@ router.post("/cleanup", async (req: Request, res: Response) => {
   }
 });
 
-// ===== Multer 配置 =====
+// multer 配置 — 使用内存存储避免磁盘临时文件，文件内容通过 saveDocument 写入 uploads
+// 只过滤 .doc 和 .docx 格式（同时检查 MIME 类型和扩展名，双重保险）
+// 文件大小限制 50MB，防止单个大文件撑爆内存
 const storage = multer.memoryStorage();
 
 const upload = multer({
@@ -91,10 +96,10 @@ const upload = multer({
     const allowedExtensions = [".docx", ".doc"];
 
     const ext = path.extname(file.originalname).toLowerCase();
-    console.log("fileFilter: ext=", ext);
 
+    // 双重校验：MIME 类型或扩展名任一匹配即放行
+    // 为什么用 ||：某些浏览器/系统对同一文件类型上报的 MIME 不一致
     if (allowedTypes.indexOf(file.mimetype) >= 0 || allowedExtensions.indexOf(ext) >= 0) {
-      // multer 2.x FileFilterCallback 类型定义不兼容
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore
       cb(null, true);
@@ -104,14 +109,13 @@ const upload = multer({
     }
   },
   limits: {
-    fileSize: 50 * 1024 * 1024,
+    fileSize: 50 * 1024 * 1024,  // 50MB 上限
   },
 });
 
-/**
- * 上传文档（只保存到磁盘，不连接协作）
- * 用户打开文档时，前端编辑器会自动加载内容到 Yjs
- */
+// 上传文档 — 支持多文件批量上传（最多 10 个）
+// 处理流程：解码文件名 → 保存到磁盘 + 生成元数据 → 注册到文件映射表 → 返回协作信息
+// 注意：上传不建立协作连接，用户打开文档时前端编辑器才会加载内容到 Yjs
 router.post(
   "/upload",
   upload.array("files", 10),
@@ -124,10 +128,10 @@ router.post(
       const results = [];
 
       for (const file of req.files as Express.Multer.File[]) {
-        // 解码文件名
+        // 解码文件名以支持中文字符
         file.originalname = decodeFilename(file.originalname);
 
-        // 1. 保存文件到磁盘
+        // 保存文件到 uploads 目录并持久化元数据（JSON 文件）
         const metadata = await saveDocument({
           originalname: file.originalname,
           buffer: file.buffer,
@@ -135,13 +139,10 @@ router.post(
           mimetype: file.mimetype,
         });
 
-        // 2. 注册到文件映射表
+        // 注册到全局文件映射表，供 AI Agent 按名称/ID 定位文档
         registerDocument(metadata);
 
-        // 3. 保留文件，前端打开时会加载内容到 Yjs
-        // 不需要清理，文件存放在 UPLOAD_DIR
-
-        // 返回协作信息
+        // 返回包含协作信息的文档数据，前端可直接用 roomName+wsUrl 连接
         results.push(
           withCollaboration(metadata, {
             roomName: metadata.id,
@@ -162,9 +163,8 @@ router.post(
   }
 );
 
-/**
- * 获取文档列表
- */
+// 获取文档列表 — 从 uploads 目录扫描所有 .json 元数据文件
+// 返回按上传时间倒序排列的文档列表，每个文档附带协作连接信息
 router.get("/list", async (req: Request, res: Response) => {
   try {
     const documents = await getDocumentList();
@@ -186,10 +186,10 @@ router.get("/list", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * 打开文档（加入协作房间）
- * 前端负责播种 Y.Doc，后端仅返回房间信息
- */
+// 打开文档 — 前端请求打开某个文档时调用
+// 后端通过 sessionManager.ensureYjsRoom 返回房间信息
+// 前端拿到 roomName/wsUrl 后自行连接 y-websocket 协作服务
+// 注意：后端不在此处播种 Y.Doc 内容，播种由前端完成（调用 /:id/seed 获取原始文件）
 router.post("/:id/open", async (req: Request, res: Response) => {
   try {
     const id = getParamId(req);
@@ -199,7 +199,6 @@ router.post("/:id/open", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "文件不存在" });
     }
 
-    // 返回 Yjs 协作房间信息（不调 SDK，前端负责播种）
     const roomInfo = await sessionManager.ensureYjsRoom(id);
 
     res.json({
@@ -215,9 +214,9 @@ router.post("/:id/open", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * 获取文件原始内容（供前端播种用），发送完成后删除磁盘文件
- */
+// 获取种子文件 — 返回原始 DOCX 文件供前端播种到 Yjs 房间
+// sendFile 完成后自动删除磁盘文件，原因是 Yjs 协作模式已持有完整文档内容
+// 磁盘文件仅作为"种子数据源"，一次性使用后即可回收
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
     const id = getParamId(req);
@@ -229,6 +228,7 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
 
     const { filePath, metadata } = result;
 
+    // 设置正确的 MIME 类型和下载文件名
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -238,7 +238,7 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
     );
 
-    // 发送完成后删除磁盘文件（Yjs 协作模式已持有完整内容）
+    // 发送文件后删除，释放磁盘空间（Yjs 模式持有数据，无需保留源文件）
     res.sendFile(filePath, () => {
       fs.unlink(filePath).catch(() => {});
     });
@@ -248,9 +248,7 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * 获取文档信息
- */
+// 获取文档信息 — 查询单个文档的元数据（不涉及文件内容）
 router.get("/:id/info", async (req: Request, res: Response) => {
   try {
     const id = getParamId(req);
@@ -273,18 +271,17 @@ router.get("/:id/info", async (req: Request, res: Response) => {
   }
 });
 
-/**
- * 删除文档
- */
+// 删除文档 — 顺序执行：关闭 SDK 会话 → 从注册表注销 → 删除磁盘文件
+// 先关闭会话再删文件是必要的，防止 SDK 持有已删除文件的句柄导致错误
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
     const id = getParamId(req);
     const document = await getDocumentById(id);
 
-    // 关闭 SDK 会话
+    // 关闭 SDK 会话 — 必须先释放句柄再删文件
     await sessionManager.closeSessionByDocId(id);
 
-    // 从文件映射表注销
+    // 从全局注册表移除，防止 Agent 引用已不存在的文档
     unregisterDocument(id);
 
     const success = await deleteDocument(id);

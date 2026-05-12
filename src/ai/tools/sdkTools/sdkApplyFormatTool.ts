@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKApplyFormatTool — 对指定文本应用格式（粗体/斜体/下划线）
+ *
+ * 【使用的 Agent 节点】SurgicalEditor
+ * 【底层调用】editor.applyFormat(docId, text, bold, italic, underline)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

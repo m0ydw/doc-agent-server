@@ -1,6 +1,14 @@
 /**
  * ================================================================
- * Execute 阶段 Prompt 模板
+ * Execute 阶段 Prompt 模板（旧版单Agent流程）
+ *
+ * 【使用阶段】旧版 GlobalAgent 的 execute 阶段
+ * 【作用】向 LLM 描述可用的工具列表和操作原则，让 LLM 自主决定工具调用
+ * 【输入变量】
+ *   - tool_list: 工具列表描述文本（通过 buildToolList() 生成）
+ *   - execution_style_rules: 执行风格规则
+ * 【在新多Agent架构中】此 Prompt 已被 surgicalEditor 节点内的
+ *   SURGICAL_SYSTEM_PROMPT 替代，两个 Prompt 定位类似但工具集不同。
  * ================================================================
  */
 

@@ -1,17 +1,26 @@
 /**
  * ================================================================
- * Output Schemas — tool calling 用的 Zod Schema 定义
- * ================================================================
+ * Output Schemas — 结构化输出工具（Zod Schema 定义）
  *
- * 【用途】
+ * 【用途】旧版 Agent 流程中的阶段输出引导
  * 配合 streamPhaseWithSeparation，让 LLM 通过 bindTools 输出结构化数据，
  * 替代原来不可靠的 JSON mode。
  *
  * 【原理】
  * 每个阶段创建一个"输出工具"(StructuredTool)，其 schema 定义了期望的输出结构。
- * LLM 被引导调用该工具，工具的参数即为期望的结构化数据。
- * 工具本身不执行任何实际操作(func 返回参数本身)，
- * 我们只取 tool_calls[0].args 作为结果。
+ * LLM 被引导"调用该工具"，工具的参数即为期望的结构化数据。
+ * 工具本身不执行任何实际操作（func 返回参数本身），
+ * 我们只取 tool_calls[0].args 作为阶段的结构化输出。
+ *
+ * 【Output Schemas 清单】
+ * - AnalysisOutputSchema: Analyze 阶段 → 意图分类 + 操作列表
+ * - PlanOutputSchema:     Plan 阶段 → 任务清单 + 依赖关系
+ * - ValidateOutputSchema: Validate 阶段 → 验证结果 + 重试判断
+ *
+ * 【在多Agent架构中的状态】
+ * 这些 Output Schema 已被 workflow 节点的直接 JSON 输出替代。
+ * 保留它们是为了向后兼容旧版 Agent 流程。
+ * ================================================================
  */
 
 import { StructuredTool } from "@langchain/core/tools";

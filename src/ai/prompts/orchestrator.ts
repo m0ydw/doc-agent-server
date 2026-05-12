@@ -1,7 +1,17 @@
 /**
- * Orchestrator（总调度）Prompt 模板
+ * Orchestrator（总调度）Prompt 模板 — 多Agent架构专用
  *
- * Orchestrator 不直接操作文档，只做意图理解和委派决策。
+ * 【使用阶段】由 workflow nodes/orchestrator.ts 的 createOrchestratorNode 使用
+ * 【作用】让 LLM 扮演总调度员角色：理解用户意图 → 选择合适的 Agent → 制定委派计划
+ * 【输入变量】
+ *   - user_input: 用户自然语言输入
+ *   - doc_context: 文档上下文描述
+ *   - target_doc: 用户选中的目标文档名称
+ * 【输出格式】JSON: { intent, taskType, agentPlan: [{ agent, input, dependsOn }] }
+ *
+ * 【与旧版 analyze.ts 的区别】
+ * analyze.ts 用于旧版单 Agent 流程的意图分析；
+ * orchestrator.ts 用于新版多Agent Supervisor 模式的委派决策。
  */
 
 import { ChatPromptTemplate } from "@langchain/core/prompts";

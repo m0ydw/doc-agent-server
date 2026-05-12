@@ -1,9 +1,9 @@
-/**
- * 文件映射表（FileRegistry）
- * 维护所有已上传文档的注册信息，供全局 Agent 查询和定位文档
- * 注册时机：服务启动扫描、文档上传
- * 注销时机：文档删除
- */
+// 文件映射表（FileRegistry）— 全局文档注册表
+// 核心作用：维护所有已上传文档的 ID/路径/名称映射，供 AI Agent 查询和定位文档
+// 设计为内存中的单例 Map，配合磁盘元数据完成双向索引
+// 注册时机：服务启动扫描（initFileRegistry）、文档上传（registerDocument）
+// 注销时机：文档删除（unregisterDocument）
+// LLM 集成：toContextString() 生成文档列表提示词，供 AI Agent 理解可用文档集合
 
 import { getDocumentList, getDocumentById, DocumentMetadata } from "./docServices";
 
@@ -107,12 +107,12 @@ class FileRegistry {
   }
 }
 
-// 全局单例
+// 全局单例 — 保证整个服务中只有一个注册表实例
 export const fileRegistry = new FileRegistry();
 
-/**
- * 从 docServices 元数据转换为注册条目
- */
+// metadataToEntry — 将 docServices 元数据转换为注册表条目
+// 字段映射：docId、docPath、originalName、roomName、uploadedAt
+// 用于在 initFileRegistry / registerDocument 中统一转换
 function metadataToEntry(meta: DocumentMetadata): DocRegistryEntry {
   return {
     docId: meta.id,
@@ -123,10 +123,9 @@ function metadataToEntry(meta: DocumentMetadata): DocRegistryEntry {
   };
 }
 
-/**
- * 初始化：扫描 uploads 目录，注册所有已有文档
- * 在服务启动时调用
- */
+// initFileRegistry — 启动时扫描 uploads 目录，注册所有已有文档
+// 调用时机：server.ts 启动初始化阶段
+// 确保服务重启后 Agent 能立即感知到磁盘上已有的文档
 export async function initFileRegistry(): Promise<void> {
   console.log("[FileRegistry] 启动初始化：扫描已有文档...");
   const documents = await getDocumentList();
@@ -135,16 +134,16 @@ export async function initFileRegistry(): Promise<void> {
   console.log(`[FileRegistry] 初始化完成，共 ${entries.length} 个文档`);
 }
 
-/**
- * 注册单个文档（供 docRoutes 上传时调用）
- */
+// registerDocument — 注册单个文档到全局映射表
+// 调用时机：docRoutes 上传完成后
+// 让 Agent 即时感知新上传的文档，无需等待定时扫描
 export function registerDocument(meta: DocumentMetadata): void {
   fileRegistry.register(metadataToEntry(meta));
 }
 
-/**
- * 注销单个文档（供 docRoutes 删除时调用）
- */
+// unregisterDocument — 从全局映射表注销单个文档
+// 调用时机：docRoutes 删除文档时
+// 确保 Agent 不会引用已被删除的文档 ID
 export function unregisterDocument(docId: string): void {
   fileRegistry.unregister(docId);
 }

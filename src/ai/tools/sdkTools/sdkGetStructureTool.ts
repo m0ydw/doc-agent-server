@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKGetStructureTool — 获取文档结构信息（段落、表格等）
+ *
+ * 【使用的 Agent 节点】DocAnalyst（作为 readTable 的备用方案）
+ * 【底层调用】editor.getStructure(docId)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

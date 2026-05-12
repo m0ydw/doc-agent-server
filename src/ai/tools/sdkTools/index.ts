@@ -1,5 +1,29 @@
 ﻿/**
- * SDK 工具集 — 统一导出
+ * SDK 工具集 — 统一导出 + 元数据注册表
+ *
+ * 【工具清单（10个 + 1个控制工具）】
+ * 只读工具（不修改文档）:
+ *   - SDKFindTextTool:      查找文本
+ *   - SDKGetTextTool:       获取文档纯文本
+ *   - SDKFindCellTool:      查找单元格
+ *   - SDKReadTableTool:     读取表格结构
+ *   - SDKGetStructureTool:  获取文档结构信息
+ * 写入工具（修改文档）:
+ *   - SDKSetTextTool:       设置单元格文本
+ *   - SDKReplaceTextTool:   替换单个匹配
+ *   - SDKReplaceAllTool:    替换全部匹配
+ *   - SDKApplyFormatTool:   应用格式（粗体/斜体/下划线）
+ * 控制工具:
+ *   - SDKTaskCompleteTool:  标记任务完成
+ *
+ * 【元数据注册表（SDK_TOOL_METADATA）】
+ * 存储每个工具的 UI 展示信息（displayName、argsFormatter、showInUI）。
+ * wsAgentHandler 在收到 LangGraph tool_start / tool_end 事件时，
+ * 通过 getToolMetadataByName() 查找 metadata 来生成前端展示。
+ *
+ * 【模糊匹配机制】
+ * getToolMetadataByName 先精确匹配，再对 sdk_ 前缀工具做去下划线模糊匹配。
+ * 这是因为 LangGraph 运行时工具名可能带不同格式的后缀。
  */
 
 export type { SDKToolMetadata } from "./sdkToolTypes";

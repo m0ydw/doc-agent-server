@@ -1,17 +1,31 @@
 /**
  * TemplateFiller（重型填表专员）节点
  *
- * 职责：执行模板数据填充任务
+ * 职责：执行模板数据填充任务（批量写入表单数据到文档）
  *
- * 内部确定性流水线：
- *   DataExtractor → TemplateMapper → BatchWrite(DataGuard硬拦截)
+ * 【内部确定性流水线】（不含 LLM 决策）
+ *   DataExtractor → TemplateMapper → BatchWrite(DataGuard 硬拦截)
  *
- * 特点：完全确定性执行，不含 LLM 决策。
- *       LLM 决策已在 DocAnalyst（微决策）阶段完成。
- *       用完即弃：执行完毕后防御状态自动释放。
+ * 【为什么是纯确定性的？】
+ * LLM 决策已在 DocAnalyst（微决策确定目标格）阶段完成。
+ * TemplateFiller 只需按照已确定的映射表机械执行：
+ *   for each fieldMapping:
+ *     if DataGuard.guard(value) → editor.setText(ref, value)
+ * 无需 LLM 参与判断。
  *
- * 工具集：
- *   - sdk_set_text（唯一对外工具，内部含 DataGuard 拦截）
+ * 【DataGuard 安全机制】
+ * 写入前每个值都必须通过 DataGuard.guard() 检查，防止：
+ * - 写入不存在的值
+ * - 写入越界数据
+ * - 写入格式错误的值
+ *
+ * 【用完即弃模式】
+ * 执行完毕后调用 DataGuard.disarm() 释放防御状态。
+ * 异常路径也通过 finally / catch 保证 release。
+ *
+ * 【在整体流程中的位置】
+ * 由 supervisorRouter 根据 agentPlan 调度。通常跟在 docAnalyst 之后、
+ * reviewer 之前，三者形成 "分析 → 填充 → 验证" 流水线。
  */
 
 import type { RunnableConfig } from "@langchain/core/runnables";
@@ -28,15 +42,32 @@ import type { DocumentMap } from "./docAnalyst";
 
 // ================================================================
 // 主节点实现（纯确定性，无 LLM 调用）
+//
+// 执行流程：
+// 1. 解析输入数据（extractedData + documentMaps + fieldMappings）
+// 2. 如果无已有映射表 → 调用 templateMapper.buildFieldMappings 构建
+// 3. 装载 DataGuard（设置允许写入的值白名单）
+// 4. 遍历所有 mapping，对每个条目：
+//    - 检查是否已写入（跳过）
+//    - DataGuard.guard() 拦截非法写入
+//    - editor.setText() 执行写入
+// 5. 释放 DataGuard
+// 6. 返回执行统计
 // ================================================================
 
+/**
+ * 创建 TemplateFiller 节点函数
+ *
+ * 注意：此节点不需要 LLM 参数，因为所有逻辑都是确定性的。
+ * 与其他 Agent 节点的工厂函数签名不同。
+ */
 export function createTemplateFillerNode() {
   return async (state: typeof AgentState.State, config?: RunnableConfig) => {
     const docId = state.docId;
     const logs: string[] = [];
 
     try {
-      // 1. 解析输入数据
+      // 步骤1：解析输入数据（JSON 字符串 → 对象）
       let extractedData: Record<string, string> = {};
       let documentMaps: DocumentMap[] = [];
       let existingMappings: FieldMapping[] = [];
@@ -49,7 +80,7 @@ export function createTemplateFillerNode() {
         logs.push("[TemplateFiller] 输入数据解析失败，尝试从用户原始输入中提取");
       }
 
-      // 确定目标文档的 DocumentMap
+      // 确定目标文档的 DocumentMap（可能涉及多文档，取当前 docId 对应的那个）
       const targetMap = documentMaps.find((m) => m.docId === docId) || documentMaps[0];
       if (!targetMap) {
         logs.push("[TemplateFiller] 未找到目标文档的 DocumentMap，无法执行填充");
@@ -61,7 +92,7 @@ export function createTemplateFillerNode() {
         };
       }
 
-      // 2. 如果已有映射表（来自之前的执行），使用它；否则重新构建
+      // 步骤2：构建字段映射表（如果已有则复用，否则调用 templateMapper 构建）
       let mappings = existingMappings;
       if (mappings.length === 0 && extractedData && Object.keys(extractedData).length > 0) {
         const result = buildFieldMappings(targetMap, extractedData);
@@ -83,17 +114,18 @@ export function createTemplateFillerNode() {
         };
       }
 
-      // 3. 装载 DataGuard
+      // 步骤3：装载 DataGuard（设置写入值白名单，拦截非法数据）
       DataGuard.arm(extractedData);
       logs.push(`[TemplateFiller] DataGuard 已装载，允许值: ${DataGuard.getAllowedValues().join(", ")}`);
 
-      // 4. 批量写入（确定性执行）
+      // 步骤4：批量遍历写入（每个映射条目逐一处理）
       let writtenCount = 0;
       let blockedCount = 0;
       let failedCount = 0;
 
       for (const mapping of mappings) {
-        if (mapping.status === "written") continue; // 已写入，跳过
+        // 已经写入的跳过（支持增量执行/重试）
+        if (mapping.status === "written") continue;
 
         const targetRef = mapping.targetCell.ref;
         if (!targetRef) {
@@ -103,7 +135,7 @@ export function createTemplateFillerNode() {
           continue;
         }
 
-        // DataGuard 硬拦截
+        // DataGuard 硬拦截：检查写入值是否在允许列表中
         const guardResult = DataGuard.guard(mapping.userValue);
         if (!guardResult.allowed) {
           mapping.status = "blocked";
@@ -113,7 +145,7 @@ export function createTemplateFillerNode() {
           continue;
         }
 
-        // 写入
+        // 写入文档（通过 SDK 的 setText 操作）
         try {
           const result = await editor.setText(docId, targetRef, mapping.userValue);
           mapping.status = "written";
@@ -129,9 +161,10 @@ export function createTemplateFillerNode() {
         }
       }
 
-      // 5. 释放 DataGuard
+      // 步骤5：释放 DataGuard（用完即弃，防止状态泄漏到下一个节点）
       DataGuard.disarm();
 
+      // 步骤6：统计结果
       const stats = getMappingStats(mappings);
       logs.push(
         `[TemplateFiller] 填充完成: ${stats.written} 写入, ${stats.blocked} 拦截, ` +
@@ -147,7 +180,8 @@ export function createTemplateFillerNode() {
       };
 
     } catch (err: unknown) {
-      DataGuard.disarm(); // 确保释放
+      // 异常路径也要确保释放 DataGuard（防止状态泄漏）
+      DataGuard.disarm();
       logs.push(`[TemplateFiller] 异常: ${(err as Error).message}`);
       return {
         executionLog: state.executionLog + "\n" + logs.join("\n"),

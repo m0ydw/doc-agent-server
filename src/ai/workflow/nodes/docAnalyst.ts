@@ -2,17 +2,23 @@
  * DocAnalyst（文档考古学家）节点
  *
  * 职责：
- *   1. 读取文档结构（readTable）
- *   2. 定位标签单元格（findCell）
- *   3. 微决策：确定每个标签对应的目标写入格（getTargetCell）
- *   4. 产出 DocumentMap
+ *   1. 读取文档结构（readTable / getStructure）
+ *   2. 定位标签单元格（findCell — 搜索表格中包含已知标签文字的单元格）
+ *   3. 微决策：LLM 判断每个标签对应的目标写入格位置（getTargetCell）
+ *   4. 产出 DocumentMap（包含表格结构 + 标签映射的完整文档地图）
  *
- * 工具集（只读）：
- *   - sdk_read_table
- *   - sdk_find_cell
- *   - sdk_get_text（仅结构验证）
+ * 【在整体流程中的位置】
+ * 由 supervisorRouter 根据 agentPlan 调度。通常在其他 Agent 之前执行，
+ * 为 surgicalEditor / templateFiller 提供文档的结构化描述。
  *
- * LLM 角色：仅用于微决策（判断目标格位置）
+ * 【工具集（只读）】
+ *   - sdk_read_table: 读取表格结构
+ *   - sdk_find_cell: 查找指定文本所在的单元格
+ *   - sdk_get_text: 仅用于结构验证（不修改文档）
+ *
+ * 【LLM 角色】仅用于微决策（判断目标写作格位置），不做复杂推理
+ * 【为什么微决策需要 LLM？】表格格式多样化（有的标签右侧是值、有的是下方），
+ *   规则难以覆盖所有布局，需要 LLM 根据相邻单元格内容做最佳判断。
  */
 
 import { ChatOpenAI } from "@langchain/openai";
@@ -25,37 +31,52 @@ import { ALL_LABELS } from "../../modules/fieldConfig";
 import * as editor from "../../../services/editor";
 
 // ================================================================
-// 类型定义
+// 类型定义 — DocumentMap 的数据结构
 // ================================================================
 
+/** 单元格信息 */
 export interface CellInfo {
+  /** 行号（0-based） */
   row: number;
+  /** 列号（0-based） */
   col: number;
+  /** 单元格唯一引用标识（如 "A1", "B3"） */
   ref: string;
+  /** 单元格内的文本内容 */
   text: string;
 }
 
+/** LLM 微决策返回的目标单元格信息 */
 export interface TargetCellResult {
   targetRow: number;
   targetCol: number;
   targetRef: string;
+  /** 置信度：high（明确判定）/ medium（有依据但不确定）/ low（降级默认） */
   confidence: "high" | "medium" | "low";
 }
 
+/** 标签→目标格的完整映射 */
 export interface LabelMapping {
+  /** 标签文本（如 "姓名"、"联系电话"） */
   label: string;
+  /** 标签所在的单元格信息 */
   labelCell: CellInfo;
+  /** LLM 推断的目标写入格 */
   suggestedTarget: TargetCellResult;
 }
 
+/** 单个表格的分析结果 */
 export interface AnalyzedTable {
+  /** 表格在文档中的索引 */
   index: number;
   rows: number;
   cols: number;
   cells: CellInfo[];
+  /** 发现的标签映射列表 */
   labels: LabelMapping[];
 }
 
+/** 文档的完整分析地图（可能涉及多个文档） */
 export interface DocumentMap {
   docId: string;
   docName: string;
@@ -63,29 +84,49 @@ export interface DocumentMap {
 }
 
 // ================================================================
-// 微决策工具
+// 微决策工具 — 为 LLM 微决策提供上下文数据
+//
+// 工作流程：
+// 1. getSurroundingCells: 获取标签格四周的相邻单元格信息
+// 2. microDecideTargetCell: LLM 根据四周信息判断哪个是目标写入格
 // ================================================================
 
+/** 标签单元格四周的相邻单元格信息 */
 interface NeighborCells {
+  /** 右侧单元格 */
   right?: { row: number; col: number; ref: string; text: string } | null;
+  /** 右侧第二个单元格（考虑合并单元格场景） */
   rightNext?: { row: number; col: number; ref: string; text: string } | null;
+  /** 下方单元格（纵向布局常见） */
   down?: { row: number; col: number; ref: string; text: string } | null;
 }
 
+/**
+ * 获取指定单元格四周的相邻单元格
+ *
+ * 通过 cells 数组查找同行/同列偏移的单元格。
+ * 只获取 right（右侧1格）、rightNext（右侧2格）、down（下方1格）三个方向。
+ *
+ * @param docId     文档 ID
+ * @param cells     所有单元格列表
+ * @param sourceRow 源行号
+ * @param sourceCol 源列号
+ * @returns 相邻单元格信息
+ */
 async function getSurroundingCells(
   docId: string,
   cells: CellInfo[],
   sourceRow: number,
   sourceCol: number,
 ): Promise<NeighborCells> {
+  // 在 cells 数组中按行列查找
   const find = (r: number, c: number) => cells.find((cell) => cell.row === r && cell.col === c);
 
+  // getText 函数暂留，未来可改用 SDK 精确读取单元格文本
   const getText = async (cell: CellInfo | undefined): Promise<CellInfo | null> => {
     if (!cell) return null;
     try {
-      // 通过 findCell 获取该位置的文本内容
       const result = await editor.findCell(docId, cell.text || "");
-      // 如果找不到，返回基本信息
       return { ...cell, text: cell.text || "" };
     } catch {
       return cell;
@@ -105,6 +146,22 @@ async function getSurroundingCells(
 
 /**
  * LLM 微决策：从标签格四周推断目标写入格
+ *
+ * 【为什么需要 LLM 微决策？】
+ * 表格格式千变万化，标签和值的相对位置不固定：
+ * - 典型横排表格：标签在左，值在右
+ * - 竖排表格：标签在上，值在下
+ * - 合并单元格场景：标签占多列，值在更远的列
+ * 规则引擎难以覆盖所有情况，而 LLM 能根据上下文灵活判断。
+ *
+ * 【降级策略】
+ * 如果 LLM 调用失败，默认取右侧第一格（最常见的横排布局）。
+ *
+ * @param llm         LLM 实例
+ * @param labelName   标签文本
+ * @param labelCell   标签单元格信息
+ * @param surroundings 相邻单元格信息
+ * @returns LLM 判定的目标单元格 + 置信度
  */
 async function microDecideTargetCell(
   llm: ChatOpenAI,
@@ -142,7 +199,7 @@ ${surroundings.rightNext ? `- 右2格 (${labelCell.row}, ${labelCell.col + 2}): 
     console.warn("[DocAnalyst] 微决策 LLM 调用失败:", (err as Error).message);
   }
 
-  // 降级：默认取右侧第一格
+  // 降级：默认取右侧第一格（最典型布局）
   const fallback = surroundings.right;
   return {
     targetRow: fallback ? fallback.row : labelCell.row,
@@ -154,8 +211,22 @@ ${surroundings.rightNext ? `- 右2格 (${labelCell.row}, ${labelCell.col + 2}): 
 
 // ================================================================
 // 主节点实现
+//
+// 执行流程：
+// 1. 调用 editor.readTable(0) 读取第一个表格的完整结构
+// 2. 遍历已知标签列表（ALL_LABELS），通过 findCell 定位标签位置
+// 3. 对每个找到的标签，获取相邻单元格信息
+// 4. 调用 LLM 微决策确定目标写入格
+// 5. 组装 DocumentMap 返回
 // ================================================================
 
+/**
+ * 创建 DocAnalyst 节点函数
+ *
+ * 这是一个工厂函数，返回符合 LangGraph 节点签名的 async 函数。
+ *
+ * @param llm 共享的 ChatOpenAI 实例（用于微决策）
+ */
 export function createDocAnalystNode(llm: ChatOpenAI) {
   return async (state: typeof AgentState.State, config?: RunnableConfig) => {
     const docId = state.docId;
@@ -163,18 +234,18 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
     const logs: string[] = [];
 
     try {
-      // 1. 读取表格结构
+      // 步骤1：读取表格结构（第一个表格，index=0）
       const tableJson = await editor.readTable(docId, 0);
       const tableData = JSON.parse(tableJson);
 
+      // 如果 readTable 失败，尝试使用 getStructure 作为备用
       if (tableData.error) {
         logs.push(`[DocAnalyst] 读取表格失败: ${tableData.error}`);
-        // 尝试使用 getStructure 作为备用
         const structureJson = await editor.getStructure(docId);
         logs.push(`[DocAnalyst] 使用备用结构: ${structureJson.slice(0, 200)}`);
       }
 
-      // 2. 构建 CellInfo 列表
+      // 步骤2：构建 CellInfo 列表（从表格数据中提取行列和 ref）
       const cells: CellInfo[] = (tableData.cells || []).map((c: Record<string, unknown>) => ({
         row: c.row as number,
         col: c.col as number,
@@ -182,22 +253,22 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
         text: "",
       }));
 
-      // 3. 检测标签：查找表格中包含常见标签文字的单元格
+      // 步骤3：检测标签 — 遍历已知标签列表，在表格中查找对应单元格
       const labels: LabelMapping[] = [];
       for (const labelName of ALL_LABELS) {
         try {
           const findResult = await editor.findCell(docId, labelName);
           if (findResult && !findResult.startsWith("未找到")) {
-            // 解析 findCell 返回结果，提取 ref
+            // 解析 findCell 返回结果中的 ref（如 "ref=A1"）
             const refMatch = findResult.match(/ref=(\S+)/);
             if (refMatch) {
               const foundRef = refMatch[1];
-              // 在 cells 中查找对应的行/列
+              // 在 cells 中查找对应的行/列信息
               const cell = cells.find((c) => c.ref === foundRef || foundRef.startsWith(c.ref));
               if (cell) {
                 const labelCell: CellInfo = { ...cell, text: labelName };
 
-                // 4. 微决策：确定目标格
+                // 步骤4：微决策 — 获取相邻单元格并让 LLM 判断目标写入格
                 const surroundings = await getSurroundingCells(docId, cells, cell.row, cell.col);
                 const target = await microDecideTargetCell(llm, labelName, labelCell, surroundings);
 
@@ -207,10 +278,11 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
             }
           }
         } catch (err) {
-          // 标签查找失败，跳过
+          // 标签查找失败，跳过（不阻塞整体流程）
         }
       }
 
+      // 步骤5：组装 DocumentMap
       documentMaps.push({
         docId,
         docName: state.targetDocName || docId,

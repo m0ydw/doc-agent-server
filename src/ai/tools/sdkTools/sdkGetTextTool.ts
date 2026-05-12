@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKGetTextTool — 获取文档纯文本内容
+ *
+ * 【使用的 Agent 节点】Reviewer（用于读取验证）、GlobalAgent Chat 模式
+ * 【底层调用】editor.getText(docId)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

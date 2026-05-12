@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKTaskCompleteTool — 标记任务完成信号
+ *
+ * 【使用的 Agent 节点】SurgicalEditor（Tool Calling 循环退出条件）
+ * 【特点】不需要 docId，不执行文档操作。LLM 调用此工具后 Tool Calling 循环终止。
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import type { SDKToolMetadata } from "./sdkToolTypes";
 

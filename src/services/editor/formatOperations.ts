@@ -1,11 +1,18 @@
-﻿import * as sessionManager from "../../services/session";
+﻿// 格式操作 — 文档的高级编辑操作（格式设置、表格读写、单元格查找等）
+// 与 editorOperations.ts 互补：editorOperations 负责基本查找/替换，本文件负责格式和结构操作
+// 所有操作均通过会话管理器获取 SDK 文档句柄
 
+import * as sessionManager from "../../services/session";
+
+// getSession — 获取 SDK 文档句柄的内部 helper
 async function getSession(docId: string) {
   const result = await sessionManager.createOrUseSession(docId);
   return result.doc;
 }
 
-/** 在指定位置写入文本 */
+// setText — 在文档指定 ref 位置写入文本
+// 使用 text.rewrite 操作和 by:"ref" 精确定位
+// style.inline.mode = "preserve" 表示保留目标位置的原有格式
 export async function setText(docId: string, ref: string, text: string): Promise<string> {
   const doc = await getSession(docId);
   await doc.mutations.apply({
@@ -20,7 +27,9 @@ export async function setText(docId: string, ref: string, text: string): Promise
   return `已写入: "${text}"`;
 }
 
-/** 查找文本并应用格式 */
+// applyFormat — 查找匹配文本并应用格式（加粗/斜体/下划线/删除线）
+// 流程：match 找到所有匹配 → 为每个匹配生成 text.rewrite step → 批量 apply
+// setMarks 参数直接传递格式键值对（如 { bold: "on", italic: "off" }）
 export async function applyFormat(
   docId: string, pattern: string,
   format: { bold?: "on" | "off"; italic?: "on" | "off"; underline?: "on" | "off"; strike?: "on" | "off" }
@@ -40,7 +49,10 @@ export async function applyFormat(
   return `已对 ${steps.length} 处"${pattern}"应用格式: ${desc}`;
 }
 
-/** 结构化读取表格 — 返回 JSON 格式的完整表格地图供 LLM 推理 */
+// readTable — 结构化读取表格数据供 LLM 推理
+// 流程：获取表格块 → 获取维度 → 获取单元格坐标（含合并信息）→ 组装 JSON 输出
+// 注意：仅返回坐标和 ref，不包含文本内容 — 文本由 LLM 通过 findText 单独验证
+// 这样设计是为了控制输出体积，避免 LLM context 被大表格撑满
 export async function readTable(docId: string, tableIndex: number = 0): Promise<string> {
   const doc = await getSession(docId);
   // 1. 获取所有表格块
@@ -80,12 +92,15 @@ export async function readTable(docId: string, tableIndex: number = 0): Promise<
   return JSON.stringify(result, null, 2);
 }
 
-/** 兼容旧接口 */
+// getStructure — 获取文档结构（兼容旧接口，默认读取第一个表格）
 export async function getStructure(docId: string): Promise<string> {
   return await readTable(docId, 0);
 }
 
-/** 查找包含指定文本的单元格 */
+// findCell — 查找包含指定文本的表格单元格
+// 先用 doc.query.match 按 tableCell 节点类型匹配所有单元格
+// 然后遍历比对文本内容，返回匹配单元格的 ref 和文本预览
+// 输出提示帮助 LLM 理解目标填充位置（通常位于匹配单元格的右侧或下方）
 export async function findCell(docId: string, pattern: string): Promise<string> {
   const doc = await getSession(docId);
   const cells = await doc.query.match({ select: { type: "node", nodeType: "tableCell" }, require: "any" });

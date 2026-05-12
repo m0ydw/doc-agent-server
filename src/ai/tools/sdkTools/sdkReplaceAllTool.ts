@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKReplaceAllTool — 替换文档中所有匹配的文本
+ *
+ * 【使用的 Agent 节点】SurgicalEditor
+ * 【底层调用】editor.replaceAll(docId, target, replacement)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

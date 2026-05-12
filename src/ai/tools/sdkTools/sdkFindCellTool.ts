@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKFindCellTool — 在表格中查找包含指定文本的单元格
+ *
+ * 【使用的 Agent 节点】DocAnalyst（标签定位）、Reviewer（验证）
+ * 【底层调用】editor.findCell(docId, text)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

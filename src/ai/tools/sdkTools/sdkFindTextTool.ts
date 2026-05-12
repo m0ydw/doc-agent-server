@@ -1,4 +1,12 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKFindTextTool — 在文档中查找指定文本
+ *
+ * 【使用的 Agent 节点】SurgicalEditor（轻量文本编辑）
+ * 【底层调用】editor.findText(docId, pattern)
+ * 【返回】匹配的数量和位置
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";

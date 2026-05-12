@@ -1,6 +1,16 @@
 /**
  * ================================================================
- * Generate 阶段 Prompt 模板（Claude Code 风格）
+ * Generate 阶段 Prompt 模板（旧版单Agent流程）
+ *
+ * 【使用阶段】旧版 GlobalAgent 的 generate 阶段（最终阶段）
+ * 【作用】根据执行结果生成用户可见的简洁回答（不超过3句话）
+ * 【输入变量】
+ *   - language_rules: 语言规则
+ *   - user_input: 用户原始需求
+ *   - execution_summary: 执行结果摘要
+ *   - doc_snippet: 文档内容片段（用于理解上下文）
+ * 【在新多Agent架构中】generate 阶段由 Reviewer 节点的 DiffReport
+ *   替代，不再使用此 Prompt。
  * ================================================================
  */
 

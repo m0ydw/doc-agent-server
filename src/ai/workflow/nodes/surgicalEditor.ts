@@ -3,13 +3,25 @@
  *
  * 职责：执行轻量文本编辑任务（查找、替换、格式化）
  *
- * 工具集（最小 4 个）：
- *   - sdk_find_text
- *   - sdk_replace_text
- *   - sdk_replace_all
- *   - sdk_apply_format
+ * 【设计理念】"最少工具原则"
+ * 只暴露 4 个文本操作工具，刻意不包含表格工具。
+ * 这样 LLM 在简单替换任务中永远不会陷入"读表 → 猜坐标"的歧途。
+ * 表格相关操作由 docAnalyst + templateFiller 专门处理。
  *
- * 特点：看不到表格工具，永远不会在简单替换时陷入"读表→猜坐标"的歧途。
+ * 【工具集（最小 4+1 个）】
+ *   - sdk_find_text:     在文档中查找指定文本
+ *   - sdk_replace_text:  替换第一个匹配
+ *   - sdk_replace_all:   替换全部匹配
+ *   - sdk_apply_format:  应用格式（粗体/斜体/下划线）
+ *   - task_complete:     标记任务完成
+ *
+ * 【在整体流程中的位置】
+ * 由 supervisorRouter 根据 agentPlan 调度。
+ * 负责所有纯文本编辑和格式调整，不涉及表格结构分析。
+ *
+ * 【Tool Calling 循环】
+ * LLM 通过 bindTools 绑定工具集，循环调用工具直到 task_complete。
+ * 最多 10 轮（轻量编辑通常 2-3 轮即可完成）。
  */
 
 import { ChatOpenAI } from "@langchain/openai";
@@ -27,20 +39,30 @@ import {
 import { logLlmInvokeStart, logLlmInvokeResult } from "../../core/debugLogger";
 
 // ================================================================
-// 类型
+// 类型定义
 // ================================================================
 
+/** SurgicalEditor 节点接收的操作输入 */
 export interface SurgicalEditorInput {
   operation: {
+    /** 操作类型 */
     type: "find" | "replace" | "replace_all" | "format";
+    /** 查找/替换的模式文本 */
     pattern?: string;
+    /** 替换为目标文本 */
     replacement?: string;
+    /** 格式操作参数 */
     format?: { bold?: "on" | "off"; italic?: "on" | "off"; underline?: "on" | "off" };
   };
 }
 
 // ================================================================
-// System Prompt
+// System Prompt — 定义 LLM 在 Tool Calling 中的行为边界
+//
+// 关键约束：
+// - 只能用 4 个指定工具，不要探索表格结构
+// - 每步操作后用自然语言记录结果（不输出技术术语）
+// - 所有任务完成后必须调用 task_complete()
 // ================================================================
 
 const SURGICAL_SYSTEM_PROMPT = `你是精准文本编辑专家。你只能使用以下 4 个工具：
@@ -69,15 +91,31 @@ const SURGICAL_SYSTEM_PROMPT = `你是精准文本编辑专家。你只能使用
 - 禁止输出 JSON 结构或参数列表`;
 
 // ================================================================
-// 主节点实现
+// 主节点实现 — LLM Tool Calling 循环
+//
+// 执行流程：
+// 1. 从 agentPlan 中解析操作指令
+// 2. 创建最小工具集并 bindTools 到 LLM
+// 3. 进入 Tool Calling 循环（最多 10 轮）：
+//    - LLM 决定调用哪个工具
+//    - 执行工具并获取结果
+//    - 将结果作为 ToolMessage 反馈给 LLM
+//    - LLM 根据反馈决定下一步
+//    - 遇到 task_complete 则退出循环
+// 4. 返回执行结果
 // ================================================================
 
+/**
+ * 创建 SurgicalEditor 节点函数
+ *
+ * @param llm 共享的 ChatOpenAI 实例
+ */
 export function createSurgicalEditorNode(llm: ChatOpenAI) {
   return async (state: typeof AgentState.State, config?: RunnableConfig) => {
     const docId = state.docId;
     const logs: string[] = [];
 
-    // 解析任务
+    // 步骤1：从 agentPlan 中解析操作指令
     let operation: SurgicalEditorInput["operation"] | null = null;
     try {
       const planData = JSON.parse(state.planJson);
@@ -87,10 +125,10 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
         operation = agentPlan[currentStep].input.operation;
       }
     } catch {
-      // 从 executionLog 中推断操作
+      // 解析失败时不设置 operation，LLM 会从 userInput 中自行推断
     }
 
-    // 初始化最小工具集
+    // 步骤2：初始化最小工具集（每个工具实例绑定到 docId）
     const tools: StructuredTool[] = [
       new SDKFindTextTool(docId),
       new SDKReplaceTextTool(docId),
@@ -99,9 +137,10 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
       new SDKTaskCompleteTool(),
     ];
 
+    // bindTools 将工具集绑定到 LLM，使 LLM 在需要时自动发出 tool_call
     const llmWithTools = llm.bindTools(tools);
 
-    // 构建消息
+    // 步骤3：构建初始消息
     const messages: Array<SystemMessage | HumanMessage | AIMessage | ToolMessage> = [
       new SystemMessage(SURGICAL_SYSTEM_PROMPT),
       new HumanMessage(
@@ -111,7 +150,7 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
       ),
     ];
 
-    // Tool calling 循环（最多 10 轮，轻量编辑）
+    // 步骤4：Tool Calling 循环（最多 10 轮）
     const MAX_ROUNDS = 10;
     for (let round = 0; round < MAX_ROUNDS; round++) {
       const endLog = logLlmInvokeStart(`SurgicalEditor.round${round + 1}`);
@@ -120,9 +159,11 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
       endLog?.();
       messages.push(response);
 
+      // LLM 返回了工具调用请求
       if (response.tool_calls && response.tool_calls.length > 0) {
         let shouldBreak = false;
         for (const tc of response.tool_calls) {
+          // 遇到 task_complete → 退出循环（任务完成）
           if (tc.name === "task_complete") {
             logs.push("[SurgicalEditor] 编辑完成");
             shouldBreak = true;
@@ -138,11 +179,13 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
             continue;
           }
 
+          // 执行工具调用
           try {
             const result = await tool.invoke(tc.args);
             const resultStr = typeof result === "string" ? result : JSON.stringify(result);
             logs.push(`[${tc.name}] ${resultStr.slice(0, 200)}`);
 
+            // 将工具结果反馈给 LLM（ToolMessage）
             messages.push(new ToolMessage({
               content: resultStr,
               tool_call_id: tc.id!,
@@ -159,7 +202,8 @@ export function createSurgicalEditorNode(llm: ChatOpenAI) {
         }
         if (shouldBreak) break;
       } else {
-        // 无工具调用，LLM 可能思考中
+        // 无工具调用：LLM 可能在生成思考文本
+        // 接近最大轮数时强制终止（避免死循环）
         if (round >= MAX_ROUNDS - 2) {
           logs.push("[SurgicalEditor] 达到最大轮数，强制终止");
           break;

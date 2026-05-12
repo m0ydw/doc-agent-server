@@ -1,17 +1,27 @@
+// 编辑操作 — 对文档进行查找/替换/文本提取等操作
+// 所有操作都通过会话管理器获取 SDK 文档句柄
+// SDK 调用方式：使用 doc.query.match 查找、doc.mutations.apply 执行变更
+
 import * as sessionManager from "../session";
 
+// getDocumentSession — 通过会话管理器获取 SDK 文档句柄
+// 内部 helper，供所有编辑操作复用
 async function getDocumentSession(docId: string) {
   const result = await sessionManager.createOrUseSession(docId);
   return result.doc;
 }
 
+// MatchItem — 文本匹配结果的结构
 export interface MatchItem {
   index: number;
   text: string;
-  ref: string;
-  evaluatedRevision: number;
+  ref: string;                    // SDK 内部引用标识，用于后续的编辑操作定位
+  evaluatedRevision: number;      // 匹配时的文档修订版本号
 }
 
+// findText — 在文档中搜索指定文本的所有匹配
+// 调用 SDK doc.query.match 进行全文搜索，require:"any" 返回全部匹配
+// 返回 MatchItem 数组，包含每个匹配的文本、ref（SDK 引用）、修订版本号
 export async function findText(docId: string, pattern: string): Promise<MatchItem[]> {
   console.log("查询内容" + pattern);
   try {
@@ -40,6 +50,9 @@ export async function findText(docId: string, pattern: string): Promise<MatchIte
   }
 }
 
+// replaceFirst — 替换文档中第一个匹配的文本
+// 流程：match 查找第一个匹配 → 获取 ref → mutations.apply 执行 text.rewrite
+// 使用 by:"ref" 定位，利用 SDK 的 ref 引用机制精确替换
 export async function replaceFirst(docId: string, targetText: string, replacement: string): Promise<any> {
   try {
     const doc = await getDocumentSession(docId);
@@ -62,6 +75,9 @@ export async function replaceFirst(docId: string, targetText: string, replacemen
   }
 }
 
+// replaceAll — 替换文档中所有匹配的文本
+// 与 replaceFirst 的区别：require:"any" 获取全部匹配，批量构造 mutations
+// atomic: true 表示所有替换作为一个原子操作执行（要么全部成功，要么全部失败）
 export async function replaceAll(docId: string, targetText: string, replacement: string): Promise<any> {
   try {
     const doc = await getDocumentSession(docId);
@@ -86,6 +102,9 @@ export async function replaceAll(docId: string, targetText: string, replacement:
   }
 }
 
+// getTextContent — 获取文档的完整纯文本内容
+// 调用 SDK doc.getText()，返回不含格式信息的纯文本
+// 用于 AI 分析、全文搜索等需要纯文本的场景
 export async function getTextContent(docId: string): Promise<string> {
   try {
     const doc = await getDocumentSession(docId);
@@ -97,6 +116,9 @@ export async function getTextContent(docId: string): Promise<string> {
   }
 }
 
+// getDocumentInfo — 获取文档的结构化信息
+// 调用 SDK doc.info()，返回文档元数据（如页数、段落数、表格数等）
+// 供 AI Agent 在分析阶段快速了解文档结构
 export async function getDocumentInfo(docId: string): Promise<any> {
   try {
     const doc = await getDocumentSession(docId);

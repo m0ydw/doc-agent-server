@@ -1,17 +1,23 @@
 /**
  * Reviewer（质检员）节点
  *
- * 职责：独立验证闭环
- *   1. 读取写入后的文档
+ * 职责：独立验证闭环 — 确保写入的数据与用户原始数据一致
+ *   1. 读取写入后的文档内容
  *   2. 对比原始用户数据与文档实际内容
- *   3. 生成差异报告
+ *   3. 生成差异报告（DiffReport）
  *
- * 工具集（只读）：
- *   - sdk_get_text
- *   - sdk_read_table
- *   - sdk_find_cell
+ * 【在整体流程中的位置】
+ * 通常是工作流中最后一个 Agent 节点（排在 templateFiller 或 surgicalEditor 之后）。
+ * 只做验证，不修改文档。
  *
- * LLM 角色：分析差异并给出建议
+ * 【工具集（只读）】
+ *   - sdk_get_text: 读取文档纯文本
+ *   - sdk_read_table: 读取表格内容
+ *   - sdk_find_cell: 查找指定位置的单元格
+ *
+ * 【LLM 角色】
+ * 当有 mismatched 或 missing 的字段时，调用 LLM 分析差异并给出自然语言建议。
+ * 单纯全部通过的场景下不需要 LLM。
  */
 
 import { ChatOpenAI } from "@langchain/openai";
@@ -22,28 +28,41 @@ import * as editor from "../../../services/editor";
 import type { FieldMapping } from "../../modules/templateMapper";
 
 // ================================================================
-// 类型
+// 类型定义
 // ================================================================
 
+/** 单个字段的差异详情 */
 export interface DiffDetail {
+  /** 字段名称 */
   fieldName: string;
+  /** 用户期望的值 */
   expected: string;
+  /** 文档中实际读取到的值 */
   actual: string;
+  /** 比对状态：ok（一致）/ mismatch（不一致）/ missing（缺失） */
   status: "ok" | "mismatch" | "missing";
 }
 
+/** 差异报告（Reviewer 节点的主要输出） */
 export interface DiffReport {
+  /** 整体结果：pass（全部通过）/ partial（部分通过）/ fail（失败） */
   result: "pass" | "partial" | "fail";
+  /** 总字段数 */
   totalFields: number;
+  /** 通过的字段数 */
   matched: number;
+  /** 不匹配的字段数 */
   mismatched: number;
+  /** 缺失的字段数 */
   missing: number;
+  /** 各字段的详细比对列表 */
   details: DiffDetail[];
+  /** LLM 生成的总结描述 */
   summary: string;
 }
 
 // ================================================================
-// System Prompt
+// System Prompt — 定义 Reviewer 的评判标准
 // ================================================================
 
 const REVIEWER_SYSTEM_PROMPT = `你是文档操作质检员。你有两份资料：
@@ -61,8 +80,22 @@ const REVIEWER_SYSTEM_PROMPT = `你是文档操作质检员。你有两份资料
 
 // ================================================================
 // 主节点实现
+//
+// 执行流程：
+// 1. 解析 fieldMappings（写入映射表）和 extractedData（用户原始数据）
+// 2. 逐字段比对文档实际内容与期望值：
+//    - 通过 readTable 获取表格内容
+//    - 通过 findCell 查找目标位置的实际文本
+// 3. 统计 matched / mismatched / missing 数量
+// 4. 如果存在差异 → 调用 LLM 生成自然语言分析
+// 5. 生成 DiffReport 返回
 // ================================================================
 
+/**
+ * 创建 Reviewer 节点函数
+ *
+ * @param llm 共享的 ChatOpenAI 实例（用于差异分析）
+ */
 export function createReviewerNode(llm: ChatOpenAI) {
   return async (state: typeof AgentState.State, config?: RunnableConfig) => {
     const docId = state.docId;
@@ -70,7 +103,7 @@ export function createReviewerNode(llm: ChatOpenAI) {
     let diffReport: DiffReport | null = null;
 
     try {
-      // 解析输入数据
+      // 步骤1：解析输入数据
       const extractedData: Record<string, string> = (() => {
         try { return JSON.parse(state.extractedData || "{}"); } catch { return {}; }
       })();
@@ -78,6 +111,7 @@ export function createReviewerNode(llm: ChatOpenAI) {
         try { return JSON.parse(state.fieldMappings || "[]"); } catch { return []; }
       })();
 
+      // 没有字段映射记录 → 无需审核
       if (fieldMappings.length === 0) {
         logs.push("[Reviewer] 无需审核（没有字段映射记录）");
         diffReport = {
@@ -90,23 +124,24 @@ export function createReviewerNode(llm: ChatOpenAI) {
           summary: "无需审核",
         };
       } else {
-        // 逐字段读取并比对
+        // 步骤2：逐字段读取并比对
         const details: DiffDetail[] = [];
 
         for (const mapping of fieldMappings) {
+          // 只验证已写入的字段（被拦截或失败的跳过）
           if (mapping.status !== "written") continue;
 
           const expected = mapping.userValue.trim();
           let actual = "";
 
           try {
-            // 通过读取文档文本来验证（降级方案：直接用 findCell 查找该位置的文本）
+            // 读取表格内容，按 targetCell.ref 定位实际单元格
             const tableResult = await editor.readTable(docId, 0);
             const tableData = JSON.parse(tableResult);
             const cells = (tableData.cells || []) as Array<Record<string, unknown>>;
             const cell = cells.find((c) => c.ref === mapping.targetCell.ref);
             if (cell) {
-              // 尝试查找该单元格的文本
+              // 尝试查找该单元格的文本内容
               try {
                 const cellResult = await editor.findCell(docId, expected.slice(0, 5));
                 if (cellResult && cellResult.includes(expected.slice(0, 5))) {
@@ -120,6 +155,7 @@ export function createReviewerNode(llm: ChatOpenAI) {
             logs.push(`[Reviewer] 无法读取字段 ${mapping.fieldName} 的实际内容`);
           }
 
+          // 步骤3：根据比对结果确定状态
           let detailStatus: DiffDetail["status"] = "ok";
           if (!actual) {
             detailStatus = "missing";
@@ -135,11 +171,12 @@ export function createReviewerNode(llm: ChatOpenAI) {
           });
         }
 
+        // 步骤4：统计汇总
         const matched = details.filter((d) => d.status === "ok").length;
         const mismatched = details.filter((d) => d.status === "mismatch").length;
         const missing = details.filter((d) => d.status === "missing").length;
 
-        // 使用 LLM 分析差异
+        // 步骤5：LLM 分析差异（仅在有不一致时调用，全部通过则跳过）
         let llmSummary = "";
         if (mismatched > 0 || missing > 0) {
           try {
@@ -159,7 +196,9 @@ export function createReviewerNode(llm: ChatOpenAI) {
           llmSummary = "所有字段验证通过，内容与用户提供的数据完全一致。";
         }
 
+        // 步骤6：生成 DiffReport
         diffReport = {
+          // 无错误 → pass；缺失超过通过数 → fail；有错误但可接受 → partial
           result: mismatched === 0 && missing === 0 ? "pass" : missing > matched ? "fail" : "partial",
           totalFields: details.length,
           matched,
@@ -172,6 +211,7 @@ export function createReviewerNode(llm: ChatOpenAI) {
         logs.push(`[Reviewer] 审核完成: ${matched}/${details.length} 通过`);
       }
     } catch (err: unknown) {
+      // 异常兜底：标记为 fail
       logs.push(`[Reviewer] 异常: ${(err as Error).message}`);
       diffReport = {
         result: "fail",

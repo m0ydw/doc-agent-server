@@ -1,7 +1,21 @@
 /**
- * Prompts 统一导出
- * - 保留旧版导出的向后兼容（供 globalAgent chat 模式使用）
- * - 新增多 Agent 架构 Prompt 导出
+ * Prompts 统一导出 — 所有 Prompt 模板的集中入口
+ *
+ * 【模块结构】
+ * - shared/: 所有阶段共享的规则（防泄露、意图分类、执行风格、语言规则）和示例
+ * - analyze.ts: 旧版 Analyze 阶段（意图分析）
+ * - plan.ts:     旧版 Plan 阶段（任务规划）
+ * - execute.ts:  旧版 Execute 阶段（执行 Prompt）
+ * - validate.ts: 旧版 Validate 阶段（验证 Prompt）
+ * - generate.ts: 旧版 Generate 阶段（生成最终回答）
+ * - chat.ts:     Chat 模式 Prompt（文档问答）
+ * - orchestrator.ts: 多Agent架构新 Prompt（总调度节点）
+ *
+ * 【使用说明】
+ * - 旧版 Prompt（analyze/plan/execute/validate/generate）供 GlobalAgent 的
+ *   非 Workflow 模式使用（向后兼容）
+ * - chatSystemPrompt 供 GlobalAgent.runChatMode 使用
+ * - orchestratorSystemPrompt + orchestratorHumanTemplate 供 workflow orchestrator 节点使用
  */
 
 // 共享规则（所有阶段通用）

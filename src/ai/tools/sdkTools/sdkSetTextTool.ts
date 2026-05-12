@@ -1,4 +1,11 @@
-﻿import { StructuredTool } from "@langchain/core/tools";
+﻿/**
+ * SDKSetTextTool — 设置指定目标格的文本内容
+ *
+ * 【使用的 Agent 节点】TemplateFiller（通过 editor 服务直接调用）
+ * 【底层调用】editor.setText(docId, ref, text)
+ */
+
+import { StructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
 import * as editor from "../../../services/editor";
 import type { SDKToolMetadata } from "./sdkToolTypes";
