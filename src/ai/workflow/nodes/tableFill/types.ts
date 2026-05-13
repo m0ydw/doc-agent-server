@@ -9,6 +9,7 @@ export interface TableCellRef {
   text: string;
   rowspan: number;
   colspan: number;
+  gridColEnd: number;  // col + colspan
 }
 
 export interface DocumentTableMap {
@@ -73,6 +74,7 @@ function toTableCellRef(cell: RawCell): TableCellRef {
     text: normalizeText(cell.text),
     rowspan: cell.rowspan,
     colspan: cell.colspan,
+    gridColEnd: cell.col + cell.colspan,
   };
 }
 

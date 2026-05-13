@@ -9,6 +9,24 @@
 import type { ExecutionPlan, FillPlan, DryRunResult, ValidationResult } from "./types";
 
 /**
+ * 冲突组详情
+ */
+interface DuplicateGroup {
+  targetKey: string;
+  count: number;
+  actions: Array<{
+    fieldName: string;
+    text: string;
+    targetNodeId: string;
+    tableIndex: number;
+    rowIndex: number;
+    colIndex: number;
+    sourceTemplate: string;
+    reason: string;
+  }>;
+}
+
+/**
  * 执行 dry-run
  */
 export function executeDryRun(plan: ExecutionPlan): DryRunResult {
@@ -22,15 +40,21 @@ export function executeDryRun(plan: ExecutionPlan): DryRunResult {
     warnings.push(...validation.warnings);
   }
 
-  // 检查是否有重复目标
-  const usedTargets = new Set<string>();
-  for (const fillPlan of plan.fillPlans) {
-    if (fillPlan.selectedTarget) {
-      const targetKey = `${fillPlan.selectedTarget.tableIndex ?? 0}_${fillPlan.selectedTarget.row}_${fillPlan.selectedTarget.col}`;
-      if (usedTargets.has(targetKey)) {
-        errors.push(`Duplicate target: ${targetKey}`);
+  // 检查是否有重复目标（使用 nodeId 优先）
+  const duplicateGroups = detectDuplicateTargets(plan);
+  if (duplicateGroups.length > 0) {
+    for (const group of duplicateGroups) {
+      errors.push(`Duplicate target: ${group.targetKey} (${group.count} actions)`);
+      // 输出详细的冲突组信息
+      console.error(`[DryRunner] ❌ 重复目标详情:`);
+      console.error(`[DryRunner]   targetKey: ${group.targetKey}`);
+      console.error(`[DryRunner]   冲突数量: ${group.count}`);
+      console.error(`[DryRunner]   冲突动作:`);
+      for (const action of group.actions) {
+        console.error(`[DryRunner]     - ${action.fieldName}: "${action.text}"`);
+        console.error(`[DryRunner]       nodeId=${action.targetNodeId}, table=${action.tableIndex}, row=${action.rowIndex}, col=${action.colIndex}`);
+        console.error(`[DryRunner]       reason=${action.reason}`);
       }
-      usedTargets.add(targetKey);
     }
   }
 
@@ -45,6 +69,45 @@ export function executeDryRun(plan: ExecutionPlan): DryRunResult {
     warnings,
     estimatedWrites,
   };
+}
+
+/**
+ * 检测重复目标
+ */
+function detectDuplicateTargets(plan: ExecutionPlan): DuplicateGroup[] {
+  const targetMap = new Map<string, DuplicateGroup>();
+
+  for (const fillPlan of plan.fillPlans) {
+    if (!fillPlan.selectedTarget) continue;
+
+    // 优先使用 nodeId 作为 targetKey
+    const targetKey = fillPlan.selectedTarget.nodeId
+      || `${fillPlan.selectedTarget.tableIndex ?? 0}_${fillPlan.selectedTarget.row}_${fillPlan.selectedTarget.col}`;
+
+    if (!targetMap.has(targetKey)) {
+      targetMap.set(targetKey, {
+        targetKey,
+        count: 0,
+        actions: [],
+      });
+    }
+
+    const group = targetMap.get(targetKey)!;
+    group.count++;
+    group.actions.push({
+      fieldName: fillPlan.fieldId,
+      text: fillPlan.semanticMeaning,
+      targetNodeId: fillPlan.selectedTarget.nodeId,
+      tableIndex: fillPlan.selectedTarget.tableIndex ?? 0,
+      rowIndex: fillPlan.selectedTarget.row,
+      colIndex: fillPlan.selectedTarget.col,
+      sourceTemplate: fillPlan.sectionContext,
+      reason: fillPlan.selectedTarget.reason,
+    });
+  }
+
+  // 只返回有重复的组
+  return [...targetMap.values()].filter(group => group.count > 1);
 }
 
 /**
