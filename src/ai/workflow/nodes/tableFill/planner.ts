@@ -27,7 +27,7 @@ export function buildLayoutBasedExecutionPlan(
       col: targetCell.col,
       confidence,
       reason: `matched by reference layout position table=${template.tableIndex}, row=${template.row}, col=${template.col}`,
-      constraintScores: new Map([["layout_position", confidence]]),
+      constraintScores: { layout_position: confidence },
       copyStyleFromReferenceNodeId: template.referenceNodeId,
     };
 

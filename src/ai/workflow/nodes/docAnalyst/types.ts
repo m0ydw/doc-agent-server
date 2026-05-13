@@ -405,7 +405,7 @@ export interface CandidateTarget {
   col: number;
   confidence: number;
   reason: string;
-  constraintScores: Map<string, number>;
+  constraintScores: Record<string, number>;
   copyStyleFromReferenceNodeId?: string;
 }
 

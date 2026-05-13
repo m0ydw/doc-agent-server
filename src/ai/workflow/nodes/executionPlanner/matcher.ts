@@ -43,7 +43,7 @@ function findCandidateTargets(
       col: cell.col,
       confidence,
       reason: generateMatchReason(schema, cell, aliases, semanticType),
-      constraintScores: new Map(),
+      constraintScores: {},
     });
   }
 

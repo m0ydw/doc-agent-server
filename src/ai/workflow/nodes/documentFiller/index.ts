@@ -11,7 +11,6 @@
  */
 
 import type { RunnableConfig } from "@langchain/core/runnables";
-import { z } from "zod";
 import { AgentState } from "../../state";
 import type { ExecutionPlan, ExecutionOptions, WriteResult } from "./types";
 import { executeDryRun } from "./dryRunner";
@@ -23,47 +22,7 @@ import {
   rollbackTransaction,
 } from "./transactionManager";
 import { parseDocument } from "../docAnalyst/parser";
-
-// Zod schema for ExecutionPlan validation
-const CandidateTargetSchema = z.object({
-  nodeId: z.string(),
-  ref: z.string(),
-  tableIndex: z.number().optional(),
-  row: z.number(),
-  col: z.number(),
-  confidence: z.number(),
-  reason: z.string(),
-  constraintScores: z.map(z.string(), z.number()).optional(),
-  copyStyleFromReferenceNodeId: z.string().optional(),
-});
-
-const FillPlanSchema = z.object({
-  fieldId: z.string(),
-  semanticMeaning: z.string(),
-  candidateTargets: z.array(CandidateTargetSchema),
-  selectedTarget: CandidateTargetSchema.optional(),
-  confidence: z.number(),
-  constraints: z.array(z.object({
-    type: z.enum(["single_target", "avoid_readonly", "prefer_multiline", "prefer_repeated_section"]),
-    weight: z.number(),
-  })),
-  sectionContext: z.string(),
-});
-
-const ExecutionPlanSchema = z.object({
-  planId: z.string(),
-  docId: z.string(),
-  schemaId: z.string(),
-  fillPlans: z.array(FillPlanSchema),
-  metadata: z.object({
-    totalFields: z.number(),
-    highConfidenceCount: z.number(),
-    mappedCount: z.number().optional(),
-    lowConfidenceCount: z.number().optional(),
-    failedReasons: z.array(z.string()).optional(),
-    generatedAt: z.string(),
-  }),
-});
+import { ExecutionPlanSchema, normalizeExecutionPlan } from "../sharedSchemas";
 
 /**
  * 创建 Document Filler 节点函数
@@ -94,7 +53,11 @@ export function createDocumentFillerNode() {
       let plan: ExecutionPlan;
       try {
         const parsed = JSON.parse(planJson);
-        const validated = ExecutionPlanSchema.safeParse(parsed);
+
+        // Normalize：将可能的 Map 转换为普通 object
+        const normalized = normalizeExecutionPlan(parsed);
+
+        const validated = ExecutionPlanSchema.safeParse(normalized);
         if (!validated.success) {
           logs.push(`[DocumentFiller] Invalid execution plan JSON: ${validated.error.message}`);
           console.error(`[DocumentFiller] ❌ Zod 校验失败:`, validated.error.issues);
@@ -103,7 +66,7 @@ export function createDocumentFillerNode() {
             delegationStep: (state.delegationStep ?? 0) + 1,
             lastAgent: "DocumentFiller",
             success: false,
-            workflowError: "执行计划 JSON 格式无效",
+            workflowError: "执行计划 constraintScores 类型无效：期望 JSON object，不应使用 Map",
           };
         }
         plan = validated.data as ExecutionPlan;

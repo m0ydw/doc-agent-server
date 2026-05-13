@@ -12,7 +12,6 @@
 
 import { ChatOpenAI } from "@langchain/openai";
 import type { RunnableConfig } from "@langchain/core/runnables";
-import { z } from "zod";
 import { AgentState } from "../../state";
 import type { SemanticDocumentSchema, ExecutionPlan, NormalizedUserData } from "./types";
 import { normalizeUserData } from "./normalizer";
@@ -20,47 +19,7 @@ import { buildExecutionPlan } from "./planBuilder";
 import { getSchema } from "../docAnalyst/schema";
 import { getTableFillAnalysis } from "../tableFill/store";
 import { buildLayoutBasedExecutionPlan } from "../tableFill/planner";
-
-// Zod schema for ExecutionPlan validation
-const CandidateTargetSchema = z.object({
-  nodeId: z.string(),
-  ref: z.string(),
-  tableIndex: z.number().optional(),
-  row: z.number(),
-  col: z.number(),
-  confidence: z.number(),
-  reason: z.string(),
-  constraintScores: z.map(z.string(), z.number()).optional(),
-  copyStyleFromReferenceNodeId: z.string().optional(),
-});
-
-const FillPlanSchema = z.object({
-  fieldId: z.string(),
-  semanticMeaning: z.string(),
-  candidateTargets: z.array(CandidateTargetSchema),
-  selectedTarget: CandidateTargetSchema.optional(),
-  confidence: z.number(),
-  constraints: z.array(z.object({
-    type: z.enum(["single_target", "avoid_readonly", "prefer_multiline", "prefer_repeated_section"]),
-    weight: z.number(),
-  })),
-  sectionContext: z.string(),
-});
-
-const ExecutionPlanSchema = z.object({
-  planId: z.string(),
-  docId: z.string(),
-  schemaId: z.string(),
-  fillPlans: z.array(FillPlanSchema),
-  metadata: z.object({
-    totalFields: z.number(),
-    highConfidenceCount: z.number(),
-    mappedCount: z.number().optional(),
-    lowConfidenceCount: z.number().optional(),
-    failedReasons: z.array(z.string()).optional(),
-    generatedAt: z.string(),
-  }),
-});
+import { ExecutionPlanSchema, normalizeExecutionPlan } from "../sharedSchemas";
 
 /**
  * 创建 Execution Planner 节点函数
@@ -123,9 +82,12 @@ export function createExecutionPlannerNode(llm: ChatOpenAI) {
         // 增强日志
         console.log(`[ExecutionPlanner] ✅ 执行计划生成成功：${plan.fillPlans.length} 个写入动作，${executablePlans.length} 个可执行`);
 
+        // Normalize：将 Map 转换为普通 object（兼容 JSON 序列化）
+        const normalizedPlan = normalizeExecutionPlan(plan);
+
         return {
           executionPlanId: plan.planId,
-          executionPlan: JSON.stringify(plan),
+          executionPlan: JSON.stringify(normalizedPlan),
           executionLog: logs.join("\n"),
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "ExecutionPlanner",
@@ -222,23 +184,26 @@ export function createExecutionPlannerNode(llm: ChatOpenAI) {
 
       logs.push(`[ExecutionPlanner] Built plan: ${executionPlan.fillPlans.length} fill plans, ${executionPlan.metadata.highConfidenceCount} high confidence, ${executablePlans.length} executable`);
 
-      // 4. Zod schema 校验
-      const validated = ExecutionPlanSchema.safeParse(executionPlan);
+      // 4. Normalize：将 Map 转换为普通 object（兼容 JSON 序列化）
+      const normalizedPlan = normalizeExecutionPlan(executionPlan);
+
+      // 5. Zod schema 校验
+      const validated = ExecutionPlanSchema.safeParse(normalizedPlan);
       if (!validated.success) {
         logs.push(`[ExecutionPlanner] Execution plan validation failed: ${validated.error.message}`);
         console.error(`[ExecutionPlanner] ❌ Zod 校验失败:`, validated.error.issues);
         return {
           executionPlanId: executionPlan.planId,
-          executionPlan: JSON.stringify(executionPlan),
+          executionPlan: JSON.stringify(normalizedPlan),
           executionLog: logs.join("\n"),
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "ExecutionPlanner",
           success: false,
-          workflowError: "执行计划 JSON 格式无效",
+          workflowError: "执行计划 constraintScores 类型无效：期望 JSON object，不应使用 Map",
         };
       }
 
-      // 5. 保存计划
+      // 6. 保存计划
       const planId = executionPlan.planId;
       // 实际实现应该持久化存储
 
@@ -248,7 +213,7 @@ export function createExecutionPlannerNode(llm: ChatOpenAI) {
       // 返回 state patch
       return {
         executionPlanId: planId,
-        executionPlan: JSON.stringify(executionPlan),
+        executionPlan: JSON.stringify(normalizedPlan),
         executionLog: logs.join("\n"),
         delegationStep: (state.delegationStep ?? 0) + 1,
         lastAgent: "ExecutionPlanner",

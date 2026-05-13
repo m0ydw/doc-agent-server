@@ -23,10 +23,10 @@ export function rankCandidates(
     const constraintEvaluations = evaluateConstraints(candidate, constraints, cell);
     const constraintScore = calculateConstraintScore(constraintEvaluations);
 
-    // 更新约束分数
-    const constraintScores = new Map<string, number>();
+    // 更新约束分数（使用普通 object，而不是 Map）
+    const constraintScores: Record<string, number> = {};
     for (const evaluation of constraintEvaluations) {
-      constraintScores.set(evaluation.constraintType, evaluation.score);
+      constraintScores[evaluation.constraintType] = evaluation.score;
     }
 
     // 综合分数 = 原始置信度 * 0.6 + 约束分数 * 0.4
