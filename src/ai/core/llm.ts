@@ -132,8 +132,8 @@ export function createChatModel(config: LLMConfig): ChatOpenAI {
  * 从环境变量推断 LLM 厂商并创建 ChatModel（零配置启动）
  *
  * 按优先级依次检查环境变量：
- * 1. ZHIPUAI_API_KEY → 创建智谱AI LLM 实例
- * 2. DEEPSEEK_API_KEY → 创建 DeepSeek LLM 实例
+ * 1. DEEPSEEK_API_KEY → 创建 DeepSeek LLM 实例
+ * 2. ZHIPUAI_API_KEY → 创建智谱AI LLM 实例
  * 3. OPENAI_API_KEY   → 创建 OpenAI LLM 实例
  *
  * 如果三者都未设置，返回 null。
@@ -146,11 +146,11 @@ export function createChatModelFromEnv(): ChatOpenAI | null {
   const deepseekKey = process.env.DEEPSEEK_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
 
-  if (zhipuKey) {
-    return createChatModel({ provider: "zhipu", apiKey: zhipuKey });
-  }
   if (deepseekKey) {
     return createChatModel({ provider: "deepseek", apiKey: deepseekKey });
+  }
+  if (zhipuKey) {
+    return createChatModel({ provider: "zhipu", apiKey: zhipuKey });
   }
   if (openaiKey) {
     return createChatModel({ provider: "openai", apiKey: openaiKey });

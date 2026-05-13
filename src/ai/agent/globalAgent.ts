@@ -22,7 +22,14 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { createChatModel } from "../core/llm";
 import type { LLMProvider } from "../core/llm";
-import { sseToolStart, sseToolResult, sseError, sseDocTarget, sseSummary, sseChat } from "../core/sseEmitter";
+import {
+  sseToolStart,
+  sseToolResult,
+  sseError,
+  sseDocTarget,
+  sseSummary,
+  sseChat,
+} from "../core/sseEmitter";
 import { chatSystemPrompt, LANGUAGE_RULES } from "../prompts";
 import { clearMemories, getMemories } from "../core/memory";
 import { fileRegistry } from "../../services/fileRegistry";
@@ -93,9 +100,10 @@ class GlobalAgent {
    *
    * 【API Key 优先级】
    * 1. config.apiKey（前端传入）
-   * 2. 环境变量 ZHIPUAI_API_KEY
+   * 2. config.provider 对应的环境变量
    * 3. 环境变量 DEEPSEEK_API_KEY
-   * 4. 环境变量 OPENAI_API_KEY
+   * 4. 环境变量 ZHIPUAI_API_KEY
+   * 5. 环境变量 OPENAI_API_KEY
    *
    * 【厂商推断逻辑】
    * 如果未指定 provider，根据环境变量匹配的 API Key 自动推断：
@@ -106,27 +114,56 @@ class GlobalAgent {
   initialize(config?: GlobalAgentConfig): void {
     if (this.initialized) return;
 
-    const apiKey = config?.apiKey || process.env.ZHIPUAI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
+    const providerEnvKey =
+      config?.provider === "zhipu"
+        ? process.env.ZHIPUAI_API_KEY
+        : config?.provider === "openai"
+          ? process.env.OPENAI_API_KEY
+          : config?.provider === "deepseek"
+            ? process.env.DEEPSEEK_API_KEY
+            : undefined;
+
+    const apiKey =
+      config?.apiKey ||
+      providerEnvKey ||
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.ZHIPUAI_API_KEY ||
+      process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn("[GlobalAgent] 未配置 API Key");
       return;
     }
 
-    let provider: LLMProvider = config?.provider || "zhipu";
+    let provider: LLMProvider = config?.provider || "deepseek";
     if (!config?.provider) {
-      if (process.env.DEEPSEEK_API_KEY && apiKey === process.env.DEEPSEEK_API_KEY) provider = "deepseek";
-      else if (process.env.OPENAI_API_KEY && apiKey === process.env.OPENAI_API_KEY) provider = "openai";
+      if (
+        process.env.DEEPSEEK_API_KEY &&
+        apiKey === process.env.DEEPSEEK_API_KEY
+      )
+        provider = "deepseek";
+      else if (
+        process.env.OPENAI_API_KEY &&
+        apiKey === process.env.OPENAI_API_KEY
+      )
+        provider = "openai";
     }
 
     const modelName = config?.modelName;
     this.llm = createChatModel({
-      provider, apiKey, modelName,
+      provider,
+      apiKey,
+      modelName,
       temperature: config?.temperature ?? 0.1,
       modelKwargs: config?.modelKwargs,
     });
 
     this.initialized = true;
-    console.log("[GlobalAgent] 初始化完成: provider=" + provider + ", model=" + (modelName || "default"));
+    console.log(
+      "[GlobalAgent] 初始化完成: provider=" +
+        provider +
+        ", model=" +
+        (modelName || "default")
+    );
   }
 
   /**
@@ -137,7 +174,8 @@ class GlobalAgent {
    * @param config 新的初始化配置
    */
   reinitialize(config?: GlobalAgentConfig): void {
-    this.llm = null; this.initialized = false;
+    this.llm = null;
+    this.initialized = false;
     this.initialize(config);
   }
 
@@ -159,16 +197,26 @@ class GlobalAgent {
    * @returns SSE 事件的异步生成器
    */
   private async *runChatMode(
-    docId: string, docName: string, userInput: string,
+    docId: string,
+    docName: string,
+    userInput: string
   ): AsyncGenerator<string, void, unknown> {
     // 步骤1：通过 SuperDoc SDK 获取文档纯文本
     yield sseToolStart("读取文档", "获取文档内容");
     let docText = "";
     try {
       docText = await editor.getText(docId);
-      yield sseToolResult(true, "读取文档", `文档全文（${docText.length} 字符）`);
+      yield sseToolResult(
+        true,
+        "读取文档",
+        `文档全文（${docText.length} 字符）`
+      );
     } catch (e: any) {
-      yield sseToolResult(false, "读取文档", `读取失败：${e.message || "未知错误"}`);
+      yield sseToolResult(
+        false,
+        "读取文档",
+        `读取失败：${e.message || "未知错误"}`
+      );
       yield sseError("无法读取文档内容");
       return;
     }
@@ -178,8 +226,9 @@ class GlobalAgent {
       doc_name: docName,
       language_rules: LANGUAGE_RULES,
       user_input: userInput,
-      doc_text: docText.substring(0, MAX_DOC_CONTEXT_CHARS) +
-        (docText.length > MAX_DOC_CONTEXT_CHARS ? `\n（文档较长，以上为前 ${MAX_DOC_CONTEXT_CHARS} 字符）` : ""),
+      doc_text: docText,
+      // .substring(0, MAX_DOC_CONTEXT_CHARS) +
+      //   (docText.length > MAX_DOC_CONTEXT_CHARS ? `\n（文档较长，以上为前 ${MAX_DOC_CONTEXT_CHARS} 字符）` : ""),
     });
 
     // 步骤3：流式调用 LLM，逐 token 返回
@@ -188,7 +237,12 @@ class GlobalAgent {
       yield sseChat(chunk.content.toString());
     }
 
-    yield sseSummary({ result: "success", summary_text: "", detail: "", failed_tasks: [] });
+    yield sseSummary({
+      result: "success",
+      summary_text: "",
+      detail: "",
+      failed_tasks: [],
+    });
   }
 
   // ============================================================
@@ -211,8 +265,10 @@ class GlobalAgent {
    * @returns 是否为纯内容查询
    */
   private isContentQuery(userInput: string): boolean {
-    const CONTENT_RE = /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
-    const MODIFY_RE = /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
+    const CONTENT_RE =
+      /总结|分析|概述|介绍|是什么|讲了什么|写了什么|有哪些|概括|说明|描述|评价/i;
+    const MODIFY_RE =
+      /替换|修改|删除|插入|加粗|改成|换成|删掉|去掉|添加|新增|追加/i;
     return CONTENT_RE.test(userInput) && !MODIFY_RE.test(userInput);
   }
 
@@ -229,7 +285,9 @@ class GlobalAgent {
    * @param params 包含 message、contextDocId、mode
    * @returns SSE 事件的异步生成器
    */
-  async *streamProcess(params: ProcessParams): AsyncGenerator<string, void, unknown> {
+  async *streamProcess(
+    params: ProcessParams
+  ): AsyncGenerator<string, void, unknown> {
     if (!this.initialized || !this.llm) {
       yield sseError("Agent 未初始化，请先配置 API Key");
       return;
@@ -242,18 +300,36 @@ class GlobalAgent {
     // Chat 模式：直接对话（不修改文档）
     if (mode === "chat") {
       const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
-      if (!targetDocId) { yield sseError("无法确定目标文档"); return; }
-      yield sseDocTarget(fileRegistry.get(targetDocId)?.originalName || targetDocId);
-      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput);
+      if (!targetDocId) {
+        yield sseError("无法确定目标文档");
+        return;
+      }
+      yield sseDocTarget(
+        fileRegistry.get(targetDocId)?.originalName || targetDocId
+      );
+      yield* this.runChatMode(
+        targetDocId,
+        fileRegistry.get(targetDocId)?.originalName || targetDocId,
+        userInput
+      );
       return;
     }
 
     // 内容查询语义 → 按 Chat 模式处理（不触发 workflow）
     if (this.isContentQuery(userInput)) {
       const targetDocId = this.resolveTargetDocId(userInput, contextDocId);
-      if (!targetDocId) { yield sseError("无法确定目标文档"); return; }
-      yield sseDocTarget(fileRegistry.get(targetDocId)?.originalName || targetDocId);
-      yield* this.runChatMode(targetDocId, fileRegistry.get(targetDocId)?.originalName || targetDocId, userInput);
+      if (!targetDocId) {
+        yield sseError("无法确定目标文档");
+        return;
+      }
+      yield sseDocTarget(
+        fileRegistry.get(targetDocId)?.originalName || targetDocId
+      );
+      yield* this.runChatMode(
+        targetDocId,
+        fileRegistry.get(targetDocId)?.originalName || targetDocId,
+        userInput
+      );
       return;
     }
 
@@ -278,13 +354,17 @@ class GlobalAgent {
    * @param contextDocId  前端传入的上下文文档 ID
    * @returns 解析出的文档 ID，没有可用文档时返回 undefined
    */
-  private resolveTargetDocId(userInput: string, contextDocId?: string): string | undefined {
+  private resolveTargetDocId(
+    userInput: string,
+    contextDocId?: string
+  ): string | undefined {
     const allDocs = fileRegistry.getAll();
     if (allDocs.length === 0) return undefined;
     if (allDocs.length === 1) return allDocs[0].docId;
     for (const doc of allDocs) {
       if (userInput.includes(doc.originalName)) return doc.docId;
-      if (userInput.includes(doc.originalName.replace(/\.\w+$/, ""))) return doc.docId;
+      if (userInput.includes(doc.originalName.replace(/\.\w+$/, "")))
+        return doc.docId;
     }
     if (contextDocId && fileRegistry.get(contextDocId)) return contextDocId;
     return allDocs[0].docId;
@@ -302,8 +382,16 @@ class GlobalAgent {
    * 获取 Agent 当前状态摘要（用于前端诊断面板）
    * @returns 包含初始化状态、文档数、记忆数的状态对象
    */
-  getStatus(): { initialized: boolean; docCount: number; memoryLength: number } {
-    return { initialized: this.initialized, docCount: fileRegistry.count, memoryLength: getMemories().length };
+  getStatus(): {
+    initialized: boolean;
+    docCount: number;
+    memoryLength: number;
+  } {
+    return {
+      initialized: this.initialized,
+      docCount: fileRegistry.count,
+      memoryLength: getMemories().length,
+    };
   }
 }
 
@@ -325,8 +413,13 @@ let globalAgent: GlobalAgent | null = null;
  *
  * @param config 初始化配置（可选）
  */
-export async function initGlobalAgent(config?: GlobalAgentConfig): Promise<void> {
-  if (globalAgent) { console.log("[GlobalAgent] 已存在"); return; }
+export async function initGlobalAgent(
+  config?: GlobalAgentConfig
+): Promise<void> {
+  if (globalAgent) {
+    console.log("[GlobalAgent] 已存在");
+    return;
+  }
   globalAgent = new GlobalAgent();
   globalAgent.initialize(config);
 }
@@ -340,11 +433,16 @@ export async function initGlobalAgent(config?: GlobalAgentConfig): Promise<void>
  * @returns GlobalAgent 单例
  */
 export function getGlobalAgent(): GlobalAgent {
-  if (!globalAgent) { globalAgent = new GlobalAgent(); console.warn("[GlobalAgent] 未初始化"); }
+  if (!globalAgent) {
+    globalAgent = new GlobalAgent();
+    console.warn("[GlobalAgent] 未初始化");
+  }
   return globalAgent;
 }
 
 /**
  * 重置全局 Agent（清除记忆，不清除 LLM 实例）
  */
-export function resetGlobalAgent(): void { globalAgent?.reset(); }
+export function resetGlobalAgent(): void {
+  globalAgent?.reset();
+}

@@ -99,19 +99,23 @@ export const sseContent = (content: string) => sse("content", { content });
 /** 发射 Chat 模式对话内容 token */
 export const sseChat = (content: string) => sse("chat_content", { content });
 /** 发射当前操作的目标文档信息 */
-export const sseDocTarget = (fileName: string) => sse("doc_target", { fileName });
+export const sseDocTarget = (fileName: string) =>
+  sse("doc_target", { fileName });
 /** 发射工具调用开始（工具名 + 参数） */
-export const sseToolStart = (tool: string, args: string) => sse("tool_start", { tool, args });
+export const sseToolStart = (tool: string, args: string) =>
+  sse("tool_start", { tool, args });
 /** 发射工具调用结果（成功/失败 + 输出） */
 export const sseToolResult = (success: boolean, tool: string, result: string) =>
   sse("tool_result", { success, tool, result });
 /** 发射任务总结报告 */
-export const sseSummary = (data: Record<string, unknown>) => sse("summary", data);
+export const sseSummary = (data: Record<string, unknown>) =>
+  sse("summary", data);
 /** 发射错误消息 */
 export const sseError = (message: string) => sse("error", { message });
 /** 发射警告消息（非致命错误） */
 export const sseWarning = (message: string) => sse("warning", { message });
 /** 发射任务清单列表 */
-export const sseTodoList = (tasks: Array<{ id: string; goal: string }>) => sse("todo_list", { tasks });
+export const sseTodoList = (tasks: Array<{ id: string; goal: string }>) =>
+  sse("todo_list", { tasks });
 /** 发射单个任务完成通知 */
 export const sseTodoDone = (id: string) => sse("todo_done", { id });

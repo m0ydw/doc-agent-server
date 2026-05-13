@@ -4,7 +4,6 @@
 
 import { Request, Response } from "express";
 import { getGlobalAgent } from "../agent/globalAgent";
-import type { LLMProvider } from "../core/llm";
 
 /**
  * 查询 Agent 状态
