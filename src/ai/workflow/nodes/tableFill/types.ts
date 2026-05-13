@@ -77,5 +77,12 @@ function toTableCellRef(cell: RawCell): TableCellRef {
 }
 
 export function normalizeText(value: unknown): string {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
+  return String(value ?? "")
+    .replace(/\s+/g, " ")  // 合并多个空白字符
+    .replace(/[\r\n]+/g, " ")  // 合并换行符
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")  // 去除不可见字符（零宽空格等）
+    .replace(/[：:]/g, ":")  // 统一冒号
+    .replace(/[，,]/g, ",")  // 统一逗号
+    .replace(/[；;]/g, ";")  // 统一分号
+    .trim();
 }

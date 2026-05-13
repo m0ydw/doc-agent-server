@@ -37,6 +37,7 @@ export const AgentState = Annotation.Root({
   /** 目标文档 ID */
   docId: Annotation<string>(),
   referenceDocId: Annotation<string>({ value: override, default: () => "" }),
+  referenceDocName: Annotation<string>({ value: override, default: () => "" }),
   targetDocId: Annotation<string>({ value: override, default: () => "" }),
   /** 文档的上下文描述（文件名、大小等元信息） */
   docContext: Annotation<string>({ value: override, default: () => "" }),

@@ -26,12 +26,24 @@ export async function dispatchWorkflow(
 ): Promise<void> {
   const graph = createWorkflow(llm);
   const currentDoc = fileRegistry.get(docId);
+
+  // 推断 referenceDocId：从 fileRegistry 中找到另一个文档作为参考文档
+  const docs = fileRegistry.getAll();
+  const otherDoc = docs.find(d => d.docId !== docId);
+
+  // 增强日志：记录文档推断结果
+  console.log(`[Workflow] Starting workflow with:`);
+  console.log(`[Workflow]   targetDoc (selected): ${currentDoc?.originalName || "unknown"} <${docId}>`);
+  console.log(`[Workflow]   referenceDoc (inferred): ${otherDoc?.originalName || "unknown"} <${otherDoc?.docId || "none"}>`);
+
   const stream = graph.streamEvents(
     {
       userInput,
       docId,
       targetDocId: docId,
       targetDocName: currentDoc?.originalName || "",
+      referenceDocId: otherDoc?.docId || "",
+      referenceDocName: otherDoc?.originalName || "",
       docContext: fileRegistry.toContextString(docId),
       maxRetry: 3,
       retryCount: 0,
@@ -44,7 +56,7 @@ export async function dispatchWorkflow(
   );
 
   for await (const event of stream) {
-    handleStreamEvent(event, send);
+    handleStreamEvent(event as unknown as Record<string, unknown>, send);
   }
 }
 

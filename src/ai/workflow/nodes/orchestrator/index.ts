@@ -62,6 +62,30 @@ export function createOrchestratorNode(llm: ChatOpenAI) {
 
       if (output.taskType === "complex_fill") {
         const resolved = resolveDocIds(state);
+
+        // 增强校验：检查是否为占位符
+        if (isPlaceholder(resolved.referenceDocId) || isPlaceholder(resolved.targetDocId)) {
+          const error = "referenceDocId 或 targetDocId 包含占位符，无法进入填表流程。请提供有效的文档ID。";
+          console.error(`[Orchestrator] ❌ 占位符检测失败:`, {
+            referenceDocId: resolved.referenceDocId,
+            targetDocId: resolved.targetDocId,
+          });
+          logs.push(formatStepLog(runId, "orchestrator", "doc_id_validation", "", resolved, "failed", error));
+          return {
+            analysis: JSON.stringify({ ...output, resolvedDocs: resolved, error }),
+            planJson: JSON.stringify({ agentPlan: [] }),
+            referenceDocId: resolved.referenceDocId,
+            targetDocId: resolved.targetDocId,
+            extractedData: extractedDataStr,
+            needsUserInput: true,
+            workflowError: error,
+            executionLog: logs.join("\n"),
+            delegationStep: 0,
+            lastAgent: "Orchestrator",
+            success: false,
+          };
+        }
+
         if (!resolved.referenceDocId || !resolved.targetDocId) {
           const error = resolved.missingReason || "复杂 DOCX 填表任务缺少 referenceDocId 或 targetDocId。";
           logs.push(formatStepLog(runId, "orchestrator", "doc_id_validation", "", resolved, "failed", error));
@@ -79,6 +103,11 @@ export function createOrchestratorNode(llm: ChatOpenAI) {
             success: false,
           };
         }
+
+        // 增强日志：记录最终确定的文档ID
+        console.log(`[Orchestrator] ✅ 文档ID校验通过:`);
+        console.log(`[Orchestrator]   referenceDoc: ${resolved.referenceDocName} <${resolved.referenceDocId}>`);
+        console.log(`[Orchestrator]   targetDoc: ${resolved.targetDocName} <${resolved.targetDocId}>`);
 
         const extractResult = await extractStructuredData(llm, state.userInput, KNOWN_FIELDS);
         extractedDataStr = JSON.stringify(extractResult.data);
@@ -127,6 +156,11 @@ export function createOrchestratorNode(llm: ChatOpenAI) {
 }
 
 async function classifyTask(llm: ChatOpenAI, state: typeof AgentState.State): Promise<OrchestratorOutput> {
+  // 增强日志：记录任务分类开始
+  console.log(`[Orchestrator] 开始任务分类...`);
+  console.log(`[Orchestrator] 用户输入: ${state.userInput.slice(0, 100)}${state.userInput.length > 100 ? "..." : ""}`);
+  console.log(`[Orchestrator] 当前文档: ${state.targetDocName || state.docId || "未指定"}`);
+
   const response = await llm.invoke([
     new SystemMessage(SYSTEM_PROMPT),
     new HumanMessage(`用户需求：${state.userInput}
@@ -142,15 +176,31 @@ ${state.docContext || fileRegistry.toContextString(state.docId)}
   const content = typeof response.content === "string"
     ? response.content
     : JSON.stringify(response.content);
+
+  // 增强日志：记录 LLM 原始输出
+  console.log(`[Orchestrator] LLM 输出长度: ${content.length} 字符`);
+
   const jsonMatch = content.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return fallbackClassification(state.userInput);
+  if (!jsonMatch) {
+    console.warn(`[Orchestrator] LLM 输出中未找到 JSON，使用 fallback 分类`);
+    return fallbackClassification(state.userInput);
+  }
 
-  const parsed = JSON.parse(jsonMatch[0]);
-  const validated = OrchestratorOutputSchema.safeParse(parsed);
-  if (!validated.success) return fallbackClassification(state.userInput);
+  try {
+    const parsed = JSON.parse(jsonMatch[0]);
+    const validated = OrchestratorOutputSchema.safeParse(parsed);
+    if (!validated.success) {
+      console.warn(`[Orchestrator] JSON schema 校验失败:`, validated.error.message);
+      return fallbackClassification(state.userInput);
+    }
 
-  const plan = sanitizePlan(validated.data);
-  return plan.agentPlan.length > 0 ? plan : fallbackClassification(state.userInput);
+    const plan = sanitizePlan(validated.data);
+    console.log(`[Orchestrator] 任务分类完成: taskType=${plan.taskType}, agentPlan=${plan.agentPlan.length} 步`);
+    return plan.agentPlan.length > 0 ? plan : fallbackClassification(state.userInput);
+  } catch (err) {
+    console.warn(`[Orchestrator] JSON 解析失败:`, (err as Error).message);
+    return fallbackClassification(state.userInput);
+  }
 }
 
 function sanitizePlan(output: OrchestratorOutput): OrchestratorOutput {
@@ -197,22 +247,67 @@ function fallbackClassification(userInput: string): OrchestratorOutput {
 function resolveDocIds(state: typeof AgentState.State): ResolvedDocIds {
   const docs = fileRegistry.getAll();
   const selected = findValidDoc(state.docId, docs);
+
+  // 第一步：推断 target（目标文档）
   const target = findValidDoc(state.targetDocId, docs)
     || (selected && looksLikeTarget(selected) ? selected : undefined)
     || findMentionedDoc(docs, state.userInput, ["空白", "blank", "模板", "target"])
     || findByNameHint(docs, ["空白", "blank", "模板", "target"])
     || selected;
+
+  // 第二步：推断 reference（参考文档），排除已选为 target 的文档
   const reference = findValidDoc(state.referenceDocId, docs)
     || findMentionedDoc(docs.filter(doc => doc.docId !== target?.docId), state.userInput, ["参考", "已填", "样例", "示例", "with", "filled", "与绘"])
     || findByNameHint(docs.filter(doc => doc.docId !== target?.docId), ["参考", "已填", "样例", "示例", "with", "filled", "与绘"])
     || docs.find(doc => doc.docId !== target?.docId);
 
+  // 第三步：防呆校验 - reference/target 传反检测
+  if (reference && target) {
+    const refName = reference.originalName.toLowerCase();
+    const targetName = target.originalName.toLowerCase();
+
+    // 检测场景1：reference 名称包含"空白"，而 target 不包含
+    const refLooksLikeTarget = looksLikeTarget(reference);
+    const targetLooksLikeTarget = looksLikeTarget(target);
+
+    if (refLooksLikeTarget && !targetLooksLikeTarget) {
+      console.warn(`[Orchestrator] ⚠️ 疑似 reference/target 传反：reference="${reference.originalName}" 包含"空白"关键词，但 target="${target.originalName}" 不包含。自动交换。`);
+      // 自动交换 reference 和 target
+      return {
+        referenceDocId: target.docId,
+        targetDocId: reference.docId,
+        referenceDocName: target.originalName,
+        targetDocName: reference.originalName,
+        missingReason: undefined,
+      };
+    }
+
+    // 检测场景2：reference 名称包含"空白表"或"blank"
+    if ((refName.includes("空白表") || refName.includes("blank")) &&
+        !(targetName.includes("空白表") || targetName.includes("blank"))) {
+      console.warn(`[Orchestrator] ⚠️ 疑似 reference/target 传反：reference="${reference.originalName}" 看起来像空白表。自动交换。`);
+      return {
+        referenceDocId: target.docId,
+        targetDocId: reference.docId,
+        referenceDocName: target.originalName,
+        targetDocName: reference.originalName,
+        missingReason: undefined,
+      };
+    }
+  }
+
+  // 第四步：常规校验
   const missing: string[] = [];
   if (!reference) missing.push("referenceDocId");
   if (!target) missing.push("targetDocId");
   if (reference && target && reference.docId === target.docId) {
     missing.push("referenceDocId 和 targetDocId 不能是同一个文档");
   }
+
+  // 增强日志
+  console.log(`[Orchestrator] 解析文档ID结果：`);
+  console.log(`[Orchestrator]   referenceDoc: ${reference?.originalName || "未找到"} <${reference?.docId || "none"}>`);
+  console.log(`[Orchestrator]   targetDoc: ${target?.originalName || "未找到"} <${target?.docId || "none"}>`);
 
   return {
     referenceDocId: reference?.docId || "",
@@ -251,7 +346,8 @@ function stripExt(value: string): string {
 }
 
 function isPlaceholder(value: string): boolean {
-  return /需用户提供|待提供|占位|placeholder|your[_-]?/.test(value);
+  // 增强占位符检测：包含更多常见占位符模式
+  return /需用户提供|待提供|占位|placeholder|your[_-]?|与绘的|待定|未指定|TBD|TODO|请提供|请填写/i.test(value);
 }
 
 function formatStepLog(

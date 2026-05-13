@@ -11,6 +11,7 @@
  */
 
 import type { RunnableConfig } from "@langchain/core/runnables";
+import { z } from "zod";
 import { AgentState } from "../../state";
 import type { ExecutionPlan, ExecutionOptions, WriteResult } from "./types";
 import { executeDryRun } from "./dryRunner";
@@ -23,6 +24,47 @@ import {
 } from "./transactionManager";
 import { parseDocument } from "../docAnalyst/parser";
 
+// Zod schema for ExecutionPlan validation
+const CandidateTargetSchema = z.object({
+  nodeId: z.string(),
+  ref: z.string(),
+  tableIndex: z.number().optional(),
+  row: z.number(),
+  col: z.number(),
+  confidence: z.number(),
+  reason: z.string(),
+  constraintScores: z.map(z.string(), z.number()).optional(),
+  copyStyleFromReferenceNodeId: z.string().optional(),
+});
+
+const FillPlanSchema = z.object({
+  fieldId: z.string(),
+  semanticMeaning: z.string(),
+  candidateTargets: z.array(CandidateTargetSchema),
+  selectedTarget: CandidateTargetSchema.optional(),
+  confidence: z.number(),
+  constraints: z.array(z.object({
+    type: z.enum(["single_target", "avoid_readonly", "prefer_multiline", "prefer_repeated_section"]),
+    weight: z.number(),
+  })),
+  sectionContext: z.string(),
+});
+
+const ExecutionPlanSchema = z.object({
+  planId: z.string(),
+  docId: z.string(),
+  schemaId: z.string(),
+  fillPlans: z.array(FillPlanSchema),
+  metadata: z.object({
+    totalFields: z.number(),
+    highConfidenceCount: z.number(),
+    mappedCount: z.number().optional(),
+    lowConfidenceCount: z.number().optional(),
+    failedReasons: z.array(z.string()).optional(),
+    generatedAt: z.string(),
+  }),
+});
+
 /**
  * 创建 Document Filler 节点函数
  */
@@ -33,6 +75,7 @@ export function createDocumentFillerNode() {
 
     try {
       logs.push("[DocumentFiller] Starting document filling...");
+      console.log(`[DocumentFiller] 目标文档: ${docId}`);
 
       // 1. 读取执行计划
       const planJson = state.executionPlan;
@@ -43,15 +86,45 @@ export function createDocumentFillerNode() {
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "DocumentFiller",
           success: false,
+          workflowError: "写入失败：没有找到执行计划。",
         };
       }
 
-      const plan: ExecutionPlan = JSON.parse(planJson);
+      // 增强 JSON 解析和 Zod 校验
+      let plan: ExecutionPlan;
+      try {
+        const parsed = JSON.parse(planJson);
+        const validated = ExecutionPlanSchema.safeParse(parsed);
+        if (!validated.success) {
+          logs.push(`[DocumentFiller] Invalid execution plan JSON: ${validated.error.message}`);
+          console.error(`[DocumentFiller] ❌ Zod 校验失败:`, validated.error.issues);
+          return {
+            executionLog: logs.join("\n"),
+            delegationStep: (state.delegationStep ?? 0) + 1,
+            lastAgent: "DocumentFiller",
+            success: false,
+            workflowError: "执行计划 JSON 格式无效",
+          };
+        }
+        plan = validated.data as ExecutionPlan;
+      } catch (err) {
+        logs.push(`[DocumentFiller] Failed to parse execution plan JSON: ${(err as Error).message}`);
+        return {
+          executionLog: logs.join("\n"),
+          delegationStep: (state.delegationStep ?? 0) + 1,
+          lastAgent: "DocumentFiller",
+          success: false,
+          workflowError: "执行计划 JSON 解析失败",
+        };
+      }
+
       logs.push(`[DocumentFiller] Loaded plan: ${plan.planId}, ${plan.fillPlans.length} fill plans`);
 
+      // 增强空计划检查
       const executablePlans = plan.fillPlans.filter(p => p.selectedTarget && p.confidence >= 0.5);
       if (executablePlans.length === 0) {
         logs.push("[DocumentFiller] No executable write actions. Refusing to report success for 0/0 writes.");
+        console.warn(`[DocumentFiller] ⚠️ 没有可执行的写入动作！fillPlans=${plan.fillPlans.length}, executablePlans=0`);
         return {
           transaction: JSON.stringify({
             id: "",
@@ -67,6 +140,9 @@ export function createDocumentFillerNode() {
           workflowError: "写入失败：执行计划为空或没有可执行 targetNodeId/ref。",
         };
       }
+
+      // 增强日志
+      console.log(`[DocumentFiller] ✅ 找到 ${executablePlans.length} 个可执行的写入动作`);
 
       // 2. 执行 dry-run
       const options: ExecutionOptions = {
@@ -84,6 +160,7 @@ export function createDocumentFillerNode() {
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "DocumentFiller",
           success: false,
+          workflowError: `Dry-run 验证失败: ${dryRunResult.errors.join(", ")}`,
         };
       }
 
@@ -143,11 +220,15 @@ export function createDocumentFillerNode() {
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "DocumentFiller",
           success: false,
+          workflowError: `写入失败：${failCount} 个字段写入失败`,
         };
       }
 
       commitTransaction(transaction.id);
       logs.push(`[DocumentFiller] Transaction committed: ${transaction.id}`);
+
+      // 增强日志
+      console.log(`[DocumentFiller] ✅ 写入完成：${successCount}/${writeResults.length} 成功`);
 
       // 返回 state patch
       return {
@@ -169,6 +250,7 @@ export function createDocumentFillerNode() {
         delegationStep: (state.delegationStep ?? 0) + 1,
         lastAgent: "DocumentFiller",
         success: false,
+        workflowError: `写入异常: ${msg}`,
       };
     }
   };
