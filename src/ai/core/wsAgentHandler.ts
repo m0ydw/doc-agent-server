@@ -28,6 +28,7 @@ import { createParser } from "eventsource-parser";
 import type { EventSourceMessage } from "eventsource-parser";
 import { getGlobalAgent } from "../agent/globalAgent";
 import { dispatchWorkflow } from "./workflowStreamHandler";
+import { dispatchToolAgentWorkflow, shouldUseToolAgentWorkflow } from "../toolAgent/toolAgentDispatchAdapter";
 import config from "../../config";
 import { logger } from "../../app";
 
@@ -51,6 +52,9 @@ interface ClientMessage {
     /** "workflow" 多Agent协作（默认）；"chat" 自由对话 */
     mode?: "workflow" | "chat";
     /** 前端传来的模型配置参数（可选） */
+    toolAgentMode?: "disabled" | "planning_only" | "shadow" | "enabled" | string;
+    referenceDocId?: string;
+    targetDocId?: string;
     modelConfig?: Record<string, unknown>;
   };
 }
@@ -157,6 +161,47 @@ export function attachAgentWs(httpServer: Server): void {
 
       try {
         // 委托给 workflowStreamHandler 处理工作流事件流
+        const toolAgentMode = typeof data.toolAgentMode === "string"
+          ? data.toolAgentMode as "disabled" | "planning_only" | "shadow" | "enabled"
+          : undefined;
+        const envEnabled = process.env.TOOL_AGENT_WORKFLOW_ENABLED === "true";
+
+        if (shouldUseToolAgentWorkflow({
+          mode: data.mode,
+          toolAgentMode,
+          envEnabled,
+        })) {
+          try {
+            const toolAgentResult = await dispatchToolAgentWorkflow({
+              userInput: data.message || "",
+              docId: data.docId || "",
+              referenceDocId: typeof data.referenceDocId === "string" ? data.referenceDocId : undefined,
+              targetDocId: typeof data.targetDocId === "string" ? data.targetDocId : data.docId,
+              mode: data.mode,
+              toolAgentMode,
+              envEnabled,
+            });
+
+            if (toolAgentResult.result.status === "failed") {
+              sendMsg("warning", {
+                message: "Tool Agent planning_only failed, falling back to legacy workflow.",
+              });
+            } else {
+              for (const message of toolAgentResult.messages) {
+                sendMsg(message.type, message.data);
+              }
+              send(ws, "done", { id: msg.id });
+              return;
+            }
+          } catch (toolAgentError) {
+            sendMsg("warning", {
+              message: `Tool Agent planning_only failed, falling back to legacy workflow: ${
+                toolAgentError instanceof Error ? toolAgentError.message : String(toolAgentError)
+              }`,
+            });
+          }
+        }
+
         await dispatchWorkflow(
           llm,
           data.message || "",
