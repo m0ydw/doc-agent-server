@@ -5,6 +5,7 @@ import { dispatchToolAgentWorkflow, shouldUseToolAgentWorkflow } from "./toolAge
 import { mapToolAgentEventToWsMessages } from "./toolAgentEventAdapter";
 import { clearToolsForTest, listTools } from "./toolRegistry";
 import { registerSafeToolSet } from "./toolSets";
+import { resolveToolAgentProviderModeForEntry } from "./toolAgentProviderModes";
 import { fileRegistry } from "../../services/fileRegistry";
 
 type HarnessStatus = "passed" | "failed";
@@ -32,6 +33,12 @@ export async function runToolAgentDispatchAdapterHarnessScenarios(): Promise<Dis
   results.push(await testMockLlmInvalidJsonRetry());
   results.push(await testMockLlmConsecutiveFailure());
   results.push(testSafeToolsAfterDispatch());
+  results.push(testResolveProviderModeNoProviderMode());
+  results.push(testResolveProviderModeLlmWithLlm());
+  results.push(testResolveProviderModeLlmWithoutLlm());
+  results.push(testResolveProviderModeMockLlmFallsBack());
+  results.push(testResolveProviderModeInvalidValue());
+  results.push(testResolveProviderModeNotPlanningOnly());
 
   clearToolsForTest();
   return results;
@@ -508,4 +515,87 @@ function registerMockDocs(): void {
 function unregisterMockDocs(): void {
   fileRegistry.unregister("ref-doc");
   fileRegistry.unregister("target-doc");
+}
+
+function testResolveProviderModeNoProviderMode(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "planning_only",
+    hasLlm: true,
+  });
+  const passed = result === "static_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: no providerMode defaults to static",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
+}
+
+function testResolveProviderModeLlmWithLlm(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "planning_only",
+    rawToolAgentProviderMode: "llm_planning_only",
+    hasLlm: true,
+  });
+  const passed = result === "llm_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: llm_planning_only with llm enabled",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
+}
+
+function testResolveProviderModeLlmWithoutLlm(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "planning_only",
+    rawToolAgentProviderMode: "llm_planning_only",
+    hasLlm: false,
+  });
+  const passed = result === "static_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: llm_planning_only without llm falls back to static",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
+}
+
+function testResolveProviderModeMockLlmFallsBack(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "planning_only",
+    rawToolAgentProviderMode: "mock_llm",
+    hasLlm: true,
+  });
+  const passed = result === "static_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: mock_llm falls back to static in real entry",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
+}
+
+function testResolveProviderModeInvalidValue(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "planning_only",
+    rawToolAgentProviderMode: "invalid_value",
+    hasLlm: true,
+  });
+  const passed = result === "static_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: invalid value falls back to static",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
+}
+
+function testResolveProviderModeNotPlanningOnly(): DispatchHarnessResult {
+  const result = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: "enabled",
+    rawToolAgentProviderMode: "llm_planning_only",
+    hasLlm: true,
+  });
+  const passed = result === "static_planning_only";
+  return {
+    name: "resolveToolAgentProviderMode: non-planning_only mode falls back to static",
+    status: passed ? "passed" : "failed",
+    detail: `result=${result}`,
+  };
 }

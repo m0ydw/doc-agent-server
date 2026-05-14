@@ -28,7 +28,9 @@ import { createParser } from "eventsource-parser";
 import type { EventSourceMessage } from "eventsource-parser";
 import { getGlobalAgent } from "../agent/globalAgent";
 import { dispatchWorkflow } from "./workflowStreamHandler";
-import { dispatchToolAgentWorkflow, shouldUseToolAgentWorkflow } from "../toolAgent/toolAgentDispatchAdapter";
+import { dispatchToolAgentWorkflow, shouldUseToolAgentWorkflow, type ToolAgentDispatchInput, type ToolAgentDispatchResult } from "../toolAgent/toolAgentDispatchAdapter";
+import { resolveToolAgentProviderModeForEntry, explainToolAgentProviderModeForEntry, type ToolAgentProviderMode } from "../toolAgent/toolAgentProviderModes";
+import type { LangChainLikeLlm } from "../toolAgent/llmDecisionClientAdapter";
 import config from "../../config";
 import { logger } from "../../app";
 
@@ -53,6 +55,7 @@ interface ClientMessage {
     mode?: "workflow" | "chat";
     /** 前端传来的模型配置参数（可选） */
     toolAgentMode?: "disabled" | "planning_only" | "shadow" | "enabled" | string;
+    toolAgentProviderMode?: string;
     referenceDocId?: string;
     targetDocId?: string;
     modelConfig?: Record<string, unknown>;
@@ -166,11 +169,58 @@ export function attachAgentWs(httpServer: Server): void {
           : undefined;
         const envEnabled = process.env.TOOL_AGENT_WORKFLOW_ENABLED === "true";
 
+        // 读取 providerMode（hidden flag）
+        const rawToolAgentProviderMode = (data as Record<string, unknown>).toolAgentProviderMode;
+        const providerMode = resolveToolAgentProviderModeForEntry({
+          toolAgentMode,
+          rawToolAgentProviderMode,
+          hasLlm: Boolean(llm),
+        });
+
+        // Diagnostic logging: 仅在 Tool Agent hidden flag 相关时打印
+        const hasToolAgentHint = envEnabled || toolAgentMode !== undefined || rawToolAgentProviderMode !== undefined;
+        if (hasToolAgentHint) {
+          const explanation = explainToolAgentProviderModeForEntry({
+            toolAgentMode,
+            rawToolAgentProviderMode,
+            hasLlm: Boolean(llm),
+          });
+          const passesLlmToDispatch = providerMode === "llm_planning_only";
+
+          logger.info({
+            id: msg.id,
+            toolAgentEnabled: envEnabled,
+            toolAgentMode: toolAgentMode ?? "undefined",
+            rawToolAgentProviderMode: typeof rawToolAgentProviderMode === "string" ? rawToolAgentProviderMode : "undefined",
+            resolvedProviderMode: providerMode,
+            reason: explanation.reason,
+            hasLlm: Boolean(llm),
+            passesLlmToDispatch,
+            hasSignal: Boolean(abortController.signal),
+          }, "[tool-agent] ws entry provider mode resolved");
+
+          if (providerMode === "llm_planning_only") {
+            logger.info({ id: msg.id }, "[tool-agent] llm_planning_only enabled for ws entry");
+          } else if (typeof rawToolAgentProviderMode === "string" && rawToolAgentProviderMode === "llm_planning_only") {
+            logger.warn({
+              id: msg.id,
+              reason: explanation.reason,
+            }, "[tool-agent] llm_planning_only requested but fallback to static_planning_only");
+          }
+        }
+
         if (shouldUseToolAgentWorkflow({
           mode: data.mode,
           toolAgentMode,
           envEnabled,
         })) {
+          logger.info({
+            id: msg.id,
+            toolAgentMode,
+            providerMode,
+            hasLlm: Boolean(llm),
+          }, "[tool-agent] ws entry dispatch selected");
+
           try {
             const toolAgentResult = await dispatchToolAgentWorkflow({
               userInput: data.message || "",
@@ -180,25 +230,47 @@ export function attachAgentWs(httpServer: Server): void {
               mode: data.mode,
               toolAgentMode,
               envEnabled,
+              providerMode,
+              llm: providerMode === "llm_planning_only" ? llm : undefined,
+              signal: abortController.signal,
             });
 
-            if (toolAgentResult.result.status === "failed") {
-              sendMsg("warning", {
-                message: "Tool Agent planning_only failed, falling back to legacy workflow.",
-              });
-            } else {
-              for (const message of toolAgentResult.messages) {
-                sendMsg(message.type, message.data);
-              }
-              send(ws, "done", { id: msg.id });
-              return;
-            }
-          } catch (toolAgentError) {
-            sendMsg("warning", {
-              message: `Tool Agent planning_only failed, falling back to legacy workflow: ${
-                toolAgentError instanceof Error ? toolAgentError.message : String(toolAgentError)
-              }`,
+            logger.info({
+              id: msg.id,
+              status: toolAgentResult.result.status,
+              providerMode,
+            }, "[tool-agent] ws entry dispatch completed");
+
+            // 发送 tool_agent_result 结构化结果
+            const resultEvent = buildToolAgentWsResultEvent({
+              id: msg.id,
+              providerMode,
+              result: toolAgentResult,
             });
+            sendMsg(resultEvent.type, { id: resultEvent.id, ...resultEvent.data });
+
+            for (const message of toolAgentResult.messages) {
+              sendMsg(message.type, message.data);
+            }
+            send(ws, "done", { id: msg.id });
+            return;
+          } catch (toolAgentError) {
+            const errorMessage = toolAgentError instanceof Error ? toolAgentError.message : String(toolAgentError);
+            logger.error({
+              id: msg.id,
+              error: errorMessage,
+              providerMode,
+            }, "[tool-agent] ws entry dispatch failed");
+
+            // 发送安全的失败结果（不暴露 stack trace）
+            const errorResultEvent = buildToolAgentWsErrorResultEvent({
+              id: msg.id,
+              providerMode,
+            });
+            sendMsg(errorResultEvent.type, { id: errorResultEvent.id, ...errorResultEvent.data });
+
+            send(ws, "done", { id: msg.id });
+            return;
           }
         }
 
@@ -253,6 +325,117 @@ function send(ws: WebSocket, type: string, data?: Record<string, unknown>) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type, data }));
   }
+}
+
+// ================================================================
+// 纯 helper：构造 dispatchToolAgentWorkflow 输入
+// ================================================================
+
+/**
+ * 构造 dispatchToolAgentWorkflow 的输入参数
+ *
+ * 纯函数，无副作用，不调用 LLM，不读取 env，不发送 ws event。
+ * 只负责把 wsAgentHandler 里已有变量整理成 dispatch input。
+ */
+export interface BuildToolAgentDispatchInputParams {
+  message: string;
+  docId: string;
+  referenceDocId?: string;
+  targetDocId?: string;
+  mode?: string;
+  toolAgentMode?: "disabled" | "planning_only" | "shadow" | "enabled";
+  rawToolAgentProviderMode?: unknown;
+  envEnabled: boolean;
+  hasLlm: boolean;
+  llm?: LangChainLikeLlm;
+  signal?: AbortSignal;
+  maxSteps?: number;
+  referenceTemplates?: unknown;
+  targetInspection?: unknown;
+}
+
+export function buildToolAgentDispatchInputFromWsEntry(
+  params: BuildToolAgentDispatchInputParams,
+): ToolAgentDispatchInput {
+  const providerMode = resolveToolAgentProviderModeForEntry({
+    toolAgentMode: params.toolAgentMode,
+    rawToolAgentProviderMode: params.rawToolAgentProviderMode,
+    hasLlm: params.hasLlm,
+  });
+
+  return {
+    userInput: params.message,
+    docId: params.docId,
+    referenceDocId: params.referenceDocId,
+    targetDocId: params.targetDocId,
+    mode: params.mode,
+    toolAgentMode: params.toolAgentMode,
+    envEnabled: params.envEnabled,
+    providerMode,
+    llm: providerMode === "llm_planning_only" ? params.llm : undefined,
+    signal: params.signal,
+    maxSteps: params.maxSteps,
+    referenceTemplates: params.referenceTemplates,
+    targetInspection: params.targetInspection,
+  };
+}
+
+// ================================================================
+// 纯 helper：构造 Tool Agent WS result 事件
+// ================================================================
+
+export interface ToolAgentWsResultEvent {
+  type: "tool_agent_result";
+  id: string;
+  data: {
+    source: "tool_agent";
+    providerMode: ToolAgentProviderMode;
+    status: string;
+    summary: string;
+    stepCount: number;
+    eventCount: number;
+    safeToolsOnly: true;
+  };
+}
+
+export function buildToolAgentWsResultEvent(params: {
+  id: string;
+  providerMode: ToolAgentProviderMode;
+  result: ToolAgentDispatchResult;
+}): ToolAgentWsResultEvent {
+  const stepCount = params.result.loopResult?.state?.toolHistory?.length ?? 0;
+  return {
+    type: "tool_agent_result",
+    id: params.id,
+    data: {
+      source: "tool_agent",
+      providerMode: params.providerMode,
+      status: params.result.result.status,
+      summary: params.result.result.summary ?? "",
+      stepCount,
+      eventCount: params.result.events.length,
+      safeToolsOnly: true,
+    },
+  };
+}
+
+export function buildToolAgentWsErrorResultEvent(params: {
+  id: string;
+  providerMode: ToolAgentProviderMode;
+}): ToolAgentWsResultEvent {
+  return {
+    type: "tool_agent_result",
+    id: params.id,
+    data: {
+      source: "tool_agent",
+      providerMode: params.providerMode,
+      status: "failed",
+      summary: "Tool Agent dispatch failed.",
+      stepCount: 0,
+      eventCount: 0,
+      safeToolsOnly: true,
+    },
+  };
 }
 
 // ================================================================
