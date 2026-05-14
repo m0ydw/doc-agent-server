@@ -81,6 +81,19 @@ export const AgentState = Annotation.Root({
   maxRetry: Annotation<number>({ value: override, default: () => 3 }),
   /** 总体任务是否成功 */
   success: Annotation<boolean>({ value: override, default: () => false }),
+  docAnalystStatus: Annotation<"idle" | "success" | "failed">({
+    value: override,
+    default: () => "idle",
+  }),
+  docAnalystResult: Annotation<string>({ value: override, default: () => "{}" }),
+  executionPlannerStatus: Annotation<"idle" | "success" | "failed">({
+    value: override,
+    default: () => "idle",
+  }),
+  documentFillerStatus: Annotation<"idle" | "success" | "failed">({
+    value: override,
+    default: () => "idle",
+  }),
   /** 当前任务是否可重试 */
   retryable: Annotation<boolean>({ value: override, default: () => true }),
   /** 是否需要等待用户提供更多输入 */

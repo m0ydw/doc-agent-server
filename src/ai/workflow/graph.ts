@@ -24,6 +24,7 @@ import {
   createExecutionPlannerNode,
   createDocumentFillerNode,
 } from "./nodes";
+import { ExecutionPlanSchema, normalizeExecutionPlan } from "./nodes/sharedSchemas";
 
 /** agentPlan 中单个委派条目的类型定义 */
 interface AgentDelegation {
@@ -89,10 +90,18 @@ export function createWorkflow(llm: ChatOpenAI) {
 /**
  * Supervisor 路由器
  */
-function supervisorRouter(state: typeof AgentState.State): string {
+export function supervisorRouter(state: typeof AgentState.State): string {
   console.log("[Router] delegationStep:", state.delegationStep);
   if (state.needsUserInput || state.workflowError) {
     console.log("[Router] stopping due to workflowError/needsUserInput:", state.workflowError);
+    return END;
+  }
+  if (state.docAnalystStatus === "failed") {
+    console.log("[Router] stopping because doc_analyst failed");
+    return END;
+  }
+  if (state.executionPlannerStatus === "failed") {
+    console.log("[Router] stopping because execution_planner failed");
     return END;
   }
   let agentPlan: AgentDelegation[] = [];
@@ -127,6 +136,10 @@ function supervisorRouter(state: typeof AgentState.State): string {
   }
 
   const agentName = normalizeAgentName(step.agent);
+  if (agentName === "document_filler" && !hasValidExecutionPlan(state)) {
+    console.log("[Router] stopping before document_filler because executionPlan is missing or invalid");
+    return END;
+  }
 
   // 支持的 Agent 列表
   const validAgents = [
@@ -141,6 +154,19 @@ function supervisorRouter(state: typeof AgentState.State): string {
 
   console.warn(`[SupervisorRouter] Unknown Agent: ${step.agent}, skipping`);
   return END;
+}
+
+function hasValidExecutionPlan(state: typeof AgentState.State): boolean {
+  if (!state.executionPlanId || !state.executionPlan || state.executionPlan === "{}") {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(state.executionPlan);
+    return ExecutionPlanSchema.safeParse(normalizeExecutionPlan(parsed)).success;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeAgentName(agent: string): string {

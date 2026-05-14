@@ -12,6 +12,14 @@ export interface TableCellRef {
   gridColEnd: number;  // col + colspan
 }
 
+export interface DuplicateTemplateGroup {
+  targetKey: string;
+  tableIndex: number;
+  row: number;
+  col: number;
+  fieldPaths: string[];
+}
+
 export interface DocumentTableMap {
   docId: string;
   tables: Array<{
@@ -42,6 +50,13 @@ export interface TableFillAnalysis {
   target: DocumentTableMap;
   templates: ReferenceFieldTemplate[];
   failedReasons: string[];
+  failedSections?: Array<{
+    sectionName: string;
+    tableIndex: number;
+    reason: string;
+  }>;
+  missingSections?: string[];
+  duplicateTemplateGroups?: DuplicateTemplateGroup[];
   createdAt: string;
 }
 

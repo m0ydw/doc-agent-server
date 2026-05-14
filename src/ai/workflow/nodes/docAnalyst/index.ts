@@ -1,18 +1,3 @@
-/**
- * ================================================================
- * DocAnalyst 节点入口
- * ================================================================
- *
- * Layer 1-8: 文档理解（不负责执行）
- *
- * 职责：
- * - Parser → Spatial Graph → Summarization → Multi-pass Understanding → Semantic Schema
- *
- * 不负责：
- * - Execution Planning
- * - Document Filling
- */
-
 import { ChatOpenAI } from "@langchain/openai";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { AgentState } from "../../state";
@@ -26,11 +11,35 @@ import { saveArtifacts, buildArtifacts } from "./artifacts";
 import { buildSemanticSchema, saveSchema } from "./schema";
 import { analyzeReferenceAndTargetTables } from "../tableFill/analyzer";
 
-/**
- * 创建 DocAnalyst 节点函数
- */
+function failedDocAnalystPatch(
+  state: typeof AgentState.State,
+  logs: string[],
+  reason: string,
+  errorMessage: string,
+  stack?: string,
+  extra?: Record<string, unknown>,
+): Partial<typeof AgentState.State> {
+  return {
+    executionLog: logs.join("\n"),
+    delegationStep: (state.delegationStep ?? 0) + 1,
+    lastAgent: "DocAnalyst",
+    docAnalystStatus: "failed",
+    docAnalystResult: JSON.stringify({
+      status: "failed",
+      reason,
+      errorMessage,
+      stack,
+      analysis: null,
+      ...extra,
+    }),
+    success: false,
+    retryable: false,
+    workflowError: "DocAnalyst 分析失败，未生成执行计划",
+  };
+}
+
 export function createDocAnalystNode(llm: ChatOpenAI) {
-  return async (state: typeof AgentState.State, config?: RunnableConfig): Promise<Partial<typeof AgentState.State>> => {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig): Promise<Partial<typeof AgentState.State>> => {
     const docId = state.docId;
     const logs: string[] = [];
 
@@ -45,18 +54,38 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
           state.targetDocId,
           userData,
         );
+
         logs.push(`[DocAnalyst] Reference tables=${tableAnalysis.reference.tables.length}, target tables=${tableAnalysis.target.tables.length}`);
         logs.push(`[DocAnalyst] Field templates=${tableAnalysis.templates.length}, failed=${tableAnalysis.failedReasons.length}`);
 
-        if (tableAnalysis.templates.length === 0) {
+        if (
+          tableAnalysis.templates.length === 0 ||
+          (tableAnalysis.missingSections?.length || 0) > 0 ||
+          (tableAnalysis.duplicateTemplateGroups?.length || 0) > 0
+        ) {
           logs.push("[DocAnalyst] Failed: no field position templates were extracted from reference document");
           return {
             tableAnalysisId: tableAnalysis.analysisId,
-            executionLog: logs.join("\n"),
-            delegationStep: (state.delegationStep ?? 0) + 1,
-            lastAgent: "DocAnalyst",
-            success: false,
-            workflowError: "参考文档未能建立任何字段位置模板，无法生成目标文档写入计划。",
+            ...failedDocAnalystPatch(
+              state,
+              logs,
+              tableAnalysis.duplicateTemplateGroups?.length
+                ? "DUPLICATE_FIELD_TEMPLATES"
+                : tableAnalysis.missingSections?.length
+                  ? "SECTION_TEMPLATE_NOT_FOUND"
+                  : "NO_FIELD_POSITION_TEMPLATES",
+              tableAnalysis.duplicateTemplateGroups?.length
+                ? "DocAnalyst 生成了重复目标模板，无法生成安全写入计划。"
+                : tableAnalysis.missingSections?.length
+                  ? "数组字段缺少 section 模板，无法生成安全写入计划。"
+                  : "参考文档未能建立任何字段位置模板，无法生成目标文档写入计划。",
+              undefined,
+              {
+                failedSections: tableAnalysis.failedSections || [],
+                missingSections: tableAnalysis.missingSections || [],
+                duplicateTemplateGroups: tableAnalysis.duplicateTemplateGroups || [],
+              },
+            ),
           };
         }
 
@@ -65,43 +94,43 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
           executionLog: logs.join("\n"),
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "DocAnalyst",
+          docAnalystStatus: "success",
+          docAnalystResult: JSON.stringify({
+            status: "success",
+            analysis: {
+              tableAnalysisId: tableAnalysis.analysisId,
+              templateCount: tableAnalysis.templates.length,
+              failedSections: tableAnalysis.failedSections || [],
+            },
+          }),
           success: true,
+          workflowError: "",
         };
       }
 
-      // ================================================================
-      // Layer 1: Document Parser
-      // ================================================================
       logs.push("[DocAnalyst] Layer 1: Parsing document...");
       const payload = await parseDocument(docId, false);
 
       if (payload.tables.length === 0) {
         logs.push("[DocAnalyst] No tables found in document");
-        return {
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "DocAnalyst",
-          success: false,
-        };
+        return failedDocAnalystPatch(
+          state,
+          logs,
+          "NO_TABLES_FOUND",
+          "文档中未找到表格。",
+        );
       }
 
       logs.push(`[DocAnalyst] Found ${payload.tables.length} tables, extraction method: ${payload.extractionMethod}, coverage: ${(payload.extractionCoverage * 100).toFixed(1)}%`);
 
-      // ================================================================
-      // Layer 2: Logical Spatial Graph
-      // ================================================================
       logs.push("[DocAnalyst] Layer 2: Building spatial graph...");
       const graph = buildSpatialGraph(payload);
       logs.push(`[DocAnalyst] Built graph: ${graph.nodes.length} nodes, ${graph.edges.length} edges, ${graph.sections.length} sections, ${graph.repeatedPatterns.length} patterns`);
 
-      // ================================================================
-      // Layer 3: Complexity Classifier
-      // ================================================================
       logs.push("[DocAnalyst] Layer 3: Classifying complexity...");
       const complexity = classifyComplexity(payload, graph);
       logs.push(`[DocAnalyst] Complexity: score=${complexity.score.toFixed(2)}, mode=${complexity.mode}, estimatedTokens=${complexity.factors.estimatedTokens}`);
 
-      // 重新解析文档（如果需要 complex mode）
       if (complexity.mode === "complex" && payload.extractionCoverage < 0.7) {
         logs.push("[DocAnalyst] Re-parsing with complex mode...");
         const complexPayload = await parseDocument(docId, true);
@@ -110,32 +139,22 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
         }
       }
 
-      // ================================================================
-      // Layer 4: Structural Summarization
-      // ================================================================
       logs.push("[DocAnalyst] Layer 4: Generating structural summary...");
       const summary = generateStructuralSummary(payload, graph, complexity.mode);
 
-      // ================================================================
-      // Layer 5: Multi-pass LLM Understanding
-      // ================================================================
       logs.push("[DocAnalyst] Layer 5: Performing multi-pass LLM understanding...");
       const tokenBudget = new TokenBudgetManager(complexity.factors.estimatedTokens);
-
       const analysisResult = await understandDocument(
         llm,
         payload,
         graph,
         summary,
         complexity.mode,
-        tokenBudget
+        tokenBudget,
       );
 
       logs.push(`[DocAnalyst] Analysis result: success=${analysisResult.success}, mode=${analysisResult.mode}, fallback=${analysisResult.fallbackUsed}, confidence=${(analysisResult.overallConfidence * 100).toFixed(1)}%`);
 
-      // ================================================================
-      // Layer 7: Analysis Artifacts
-      // ================================================================
       logs.push("[DocAnalyst] Layer 7: Building analysis artifacts...");
       const artifacts = buildArtifacts(
         docId,
@@ -147,46 +166,47 @@ export function createDocAnalystNode(llm: ChatOpenAI) {
         analysisResult.sectionUnderstandings,
         analysisResult.fieldUnderstandings,
         analysisResult.fallbackUsed,
-        analysisResult.fallbackReason
+        analysisResult.fallbackReason,
       );
 
       const artifactsId = await saveArtifacts(artifacts);
       logs.push(`[DocAnalyst] Artifacts saved: ${artifactsId}`);
 
-      // ================================================================
-      // Layer 8: Semantic Document Schema
-      // ================================================================
       logs.push("[DocAnalyst] Layer 8: Building semantic document schema...");
       const schema = buildSemanticSchema(artifacts, "minimal");
       const schemaId = await saveSchema(schema);
       logs.push(`[DocAnalyst] Schema saved: ${schemaId}`);
 
-      // 返回 state patch
       return {
         analysisArtifactsId: artifactsId,
         semanticSchemaId: schemaId,
         executionLog: logs.join("\n"),
         delegationStep: (state.delegationStep ?? 0) + 1,
         lastAgent: "DocAnalyst",
+        docAnalystStatus: "success",
+        docAnalystResult: JSON.stringify({
+          status: "success",
+          analysis: { schemaId, artifactsId },
+        }),
         success: true,
+        workflowError: "",
       };
-
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       logs.push(`[DocAnalyst] Error: ${msg}`);
       console.error("[DocAnalyst] Error:", err);
 
-      return {
-        executionLog: logs.join("\n"),
-        delegationStep: (state.delegationStep ?? 0) + 1,
-        lastAgent: "DocAnalyst",
-        success: false,
-      };
+      return failedDocAnalystPatch(
+        state,
+        logs,
+        "DOC_ANALYST_EXCEPTION",
+        msg,
+        err instanceof Error ? err.stack : undefined,
+      );
     }
   };
 }
 
-// 重新导出类型
 export type {
   SemanticDocumentSchema,
   AnalysisArtifacts,

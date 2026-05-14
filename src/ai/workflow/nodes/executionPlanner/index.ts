@@ -1,19 +1,7 @@
-/**
- * ================================================================
- * Execution Planner 节点入口
- * ================================================================
- *
- * 独立 LangGraph 节点：
- * - 读取 SemanticDocumentSchema
- * - 归一化用户数据
- * - 匹配 + 排名 + 约束
- * - 输出 ExecutionPlan
- */
-
 import { ChatOpenAI } from "@langchain/openai";
 import type { RunnableConfig } from "@langchain/core/runnables";
 import { AgentState } from "../../state";
-import type { SemanticDocumentSchema, ExecutionPlan, NormalizedUserData } from "./types";
+import type { ExecutionPlan, NormalizedUserData } from "./types";
 import { normalizeUserData } from "./normalizer";
 import { buildExecutionPlan } from "./planBuilder";
 import { getSchema } from "../docAnalyst/schema";
@@ -21,11 +9,47 @@ import { getTableFillAnalysis } from "../tableFill/store";
 import { buildLayoutBasedExecutionPlan } from "../tableFill/planner";
 import { ExecutionPlanSchema, normalizeExecutionPlan } from "../sharedSchemas";
 
-/**
- * 创建 Execution Planner 节点函数
- */
-export function createExecutionPlannerNode(llm: ChatOpenAI) {
-  return async (state: typeof AgentState.State, config?: RunnableConfig): Promise<Partial<typeof AgentState.State>> => {
+function failedPlannerPatch(
+  state: typeof AgentState.State,
+  logs: string[],
+  message: string,
+  plan?: ExecutionPlan,
+): Partial<typeof AgentState.State> {
+  return {
+    executionPlanId: plan?.planId || "",
+    executionPlan: plan ? JSON.stringify(normalizeExecutionPlan(plan)) : state.executionPlan,
+    executionLog: logs.join("\n"),
+    delegationStep: (state.delegationStep ?? 0) + 1,
+    lastAgent: "ExecutionPlanner",
+    executionPlannerStatus: "failed",
+    success: false,
+    retryable: false,
+    workflowError: message,
+  };
+}
+
+function hasExecutablePlans(plan: ExecutionPlan): boolean {
+  return Array.isArray(plan.fillPlans)
+    && plan.fillPlans.some(fillPlan => fillPlan.selectedTarget && fillPlan.confidence >= 0.5);
+}
+
+function validatePlanOrFail(plan: ExecutionPlan): string | null {
+  if (!Array.isArray(plan.fillPlans) || plan.fillPlans.length === 0) {
+    return "执行规划失败：没有生成任何 targetNodeId/ref 级写入动作。";
+  }
+  if (!hasExecutablePlans(plan)) {
+    return "执行规划失败：没有可执行的写入动作（所有目标置信度过低或缺失）。";
+  }
+  const normalized = normalizeExecutionPlan(plan);
+  const validated = ExecutionPlanSchema.safeParse(normalized);
+  if (!validated.success) {
+    return "执行计划结构校验失败，未生成可交给 DocumentFiller 的合法计划。";
+  }
+  return null;
+}
+
+export function createExecutionPlannerNode(_llm: ChatOpenAI) {
+  return async (state: typeof AgentState.State, _config?: RunnableConfig): Promise<Partial<typeof AgentState.State>> => {
     const logs: string[] = [];
 
     try {
@@ -35,13 +59,7 @@ export function createExecutionPlannerNode(llm: ChatOpenAI) {
         const analysis = getTableFillAnalysis(state.tableAnalysisId);
         if (!analysis) {
           logs.push(`[ExecutionPlanner] Table analysis not found: ${state.tableAnalysisId}`);
-          return {
-            executionLog: logs.join("\n"),
-            delegationStep: (state.delegationStep ?? 0) + 1,
-            lastAgent: "ExecutionPlanner",
-            success: false,
-            workflowError: "表格分析结果不存在，无法生成写入计划。",
-          };
+          return failedPlannerPatch(state, logs, "表格分析结果不存在，无法生成写入计划。");
         }
 
         const { plan, stats } = buildLayoutBasedExecutionPlan(analysis);
@@ -50,192 +68,77 @@ export function createExecutionPlannerNode(llm: ChatOpenAI) {
           logs.push(`[ExecutionPlanner] Failed reasons: ${stats.failedReasons.join("; ")}`);
         }
 
-        // 增强空计划检查
-        if (plan.fillPlans.length === 0) {
-          console.warn(`[ExecutionPlanner] ⚠️ fillPlans 为空！`);
-          return {
-            executionPlanId: plan.planId,
-            executionPlan: JSON.stringify(plan),
-            executionLog: logs.join("\n"),
-            delegationStep: (state.delegationStep ?? 0) + 1,
-            lastAgent: "ExecutionPlanner",
-            success: false,
-            workflowError: "执行规划失败：没有生成任何 targetNodeId/ref 级写入动作。",
-          };
+        const failure = validatePlanOrFail(plan);
+        if (failure) {
+          return failedPlannerPatch(state, logs, failure, plan);
         }
-
-        // 检查是否有可执行的计划
-        const executablePlans = plan.fillPlans.filter(p => p.selectedTarget && p.confidence >= 0.5);
-        if (executablePlans.length === 0 || stats.mappedFields === 0) {
-          console.warn(`[ExecutionPlanner] ⚠️ 没有可执行的写入动作！executablePlans=${executablePlans.length}, mappedFields=${stats.mappedFields}`);
-          return {
-            executionPlanId: plan.planId,
-            executionPlan: JSON.stringify(plan),
-            executionLog: logs.join("\n"),
-            delegationStep: (state.delegationStep ?? 0) + 1,
-            lastAgent: "ExecutionPlanner",
-            success: false,
-            workflowError: "执行规划失败：没有可执行的写入动作（所有目标置信度过低或缺失）。",
-          };
-        }
-
-        // 增强日志
-        console.log(`[ExecutionPlanner] ✅ 执行计划生成成功：${plan.fillPlans.length} 个写入动作，${executablePlans.length} 个可执行`);
-
-        // Normalize：将 Map 转换为普通 object（兼容 JSON 序列化）
-        const normalizedPlan = normalizeExecutionPlan(plan);
 
         return {
           executionPlanId: plan.planId,
-          executionPlan: JSON.stringify(normalizedPlan),
+          executionPlan: JSON.stringify(normalizeExecutionPlan(plan)),
           executionLog: logs.join("\n"),
           delegationStep: (state.delegationStep ?? 0) + 1,
           lastAgent: "ExecutionPlanner",
+          executionPlannerStatus: "success",
           success: true,
+          workflowError: "",
         };
       }
 
-      // 1. 读取 SemanticDocumentSchema
       const schemaId = state.semanticSchemaId;
       if (!schemaId) {
         logs.push("[ExecutionPlanner] No schema ID found");
-        return {
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-        };
+        return failedPlannerPatch(state, logs, "执行规划失败：缺少语义 schema。");
       }
 
       const schema = await getSchema(schemaId);
       if (!schema) {
         logs.push(`[ExecutionPlanner] Schema not found: ${schemaId}`);
-        return {
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-        };
+        return failedPlannerPatch(state, logs, "执行规划失败：语义 schema 不存在。");
       }
 
-      logs.push(`[ExecutionPlanner] Loaded schema: ${schema.schemaId}, ${schema.writableCells.length} writable cells`);
-
-      // 2. 归一化用户数据（增加 JSON 校验）
       let extractedData: Record<string, unknown>;
       try {
         extractedData = JSON.parse(state.extractedData || "{}");
       } catch (err) {
         logs.push(`[ExecutionPlanner] Failed to parse extractedData JSON: ${(err as Error).message}`);
-        return {
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-          workflowError: "用户数据 JSON 解析失败",
-        };
+        return failedPlannerPatch(state, logs, "用户数据 JSON 解析失败。");
       }
 
       const normalizationResult = normalizeUserData(extractedData);
-
       logs.push(`[ExecutionPlanner] Normalized data: ${normalizationResult.matchCount}/${normalizationResult.totalCount} fields`);
 
       if (normalizationResult.matchCount === 0) {
-        logs.push("[ExecutionPlanner] No fields to fill");
-        return {
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-          workflowError: "执行规划失败：没有可填充的字段。",
-        };
+        return failedPlannerPatch(state, logs, "执行规划失败：没有可填充的字段。");
       }
 
-      // 3. 构建执行计划
       const executionPlan = buildExecutionPlan(schema, normalizationResult.normalized);
+      logs.push(`[ExecutionPlanner] Built plan: ${executionPlan.fillPlans.length} fill plans, ${executionPlan.metadata.highConfidenceCount} high confidence`);
 
-      // 增强空计划检查
-      if (executionPlan.fillPlans.length === 0) {
-        logs.push("[ExecutionPlanner] No fill plans generated");
-        return {
-          executionPlanId: executionPlan.planId,
-          executionPlan: JSON.stringify(executionPlan),
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-          workflowError: "执行规划失败：没有生成任何 targetNodeId/ref 级写入动作。",
-        };
+      const failure = validatePlanOrFail(executionPlan);
+      if (failure) {
+        return failedPlannerPatch(state, logs, failure, executionPlan);
       }
 
-      // 检查是否有可执行的计划
-      const executablePlans = executionPlan.fillPlans.filter(p => p.selectedTarget && p.confidence >= 0.5);
-      if (executablePlans.length === 0) {
-        logs.push("[ExecutionPlanner] No executable plans (all selectedTarget missing or low confidence)");
-        return {
-          executionPlanId: executionPlan.planId,
-          executionPlan: JSON.stringify(executionPlan),
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-          workflowError: "执行规划失败：没有可执行的写入动作（所有目标置信度过低或缺失）。",
-        };
-      }
-
-      logs.push(`[ExecutionPlanner] Built plan: ${executionPlan.fillPlans.length} fill plans, ${executionPlan.metadata.highConfidenceCount} high confidence, ${executablePlans.length} executable`);
-
-      // 4. Normalize：将 Map 转换为普通 object（兼容 JSON 序列化）
-      const normalizedPlan = normalizeExecutionPlan(executionPlan);
-
-      // 5. Zod schema 校验
-      const validated = ExecutionPlanSchema.safeParse(normalizedPlan);
-      if (!validated.success) {
-        logs.push(`[ExecutionPlanner] Execution plan validation failed: ${validated.error.message}`);
-        console.error(`[ExecutionPlanner] ❌ Zod 校验失败:`, validated.error.issues);
-        return {
-          executionPlanId: executionPlan.planId,
-          executionPlan: JSON.stringify(normalizedPlan),
-          executionLog: logs.join("\n"),
-          delegationStep: (state.delegationStep ?? 0) + 1,
-          lastAgent: "ExecutionPlanner",
-          success: false,
-          workflowError: "执行计划 constraintScores 类型无效：期望 JSON object，不应使用 Map",
-        };
-      }
-
-      // 6. 保存计划
-      const planId = executionPlan.planId;
-      // 实际实现应该持久化存储
-
-      // 增强日志
-      console.log(`[ExecutionPlanner] ✅ 执行计划生成成功：${executionPlan.fillPlans.length} 个写入动作，${executablePlans.length} 个可执行`);
-
-      // 返回 state patch
       return {
-        executionPlanId: planId,
-        executionPlan: JSON.stringify(normalizedPlan),
+        executionPlanId: executionPlan.planId,
+        executionPlan: JSON.stringify(normalizeExecutionPlan(executionPlan)),
         executionLog: logs.join("\n"),
         delegationStep: (state.delegationStep ?? 0) + 1,
         lastAgent: "ExecutionPlanner",
+        executionPlannerStatus: "success",
         success: true,
+        workflowError: "",
       };
-
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       logs.push(`[ExecutionPlanner] Error: ${msg}`);
       console.error("[ExecutionPlanner] Error:", err);
-
-      return {
-        executionLog: logs.join("\n"),
-        delegationStep: (state.delegationStep ?? 0) + 1,
-        lastAgent: "ExecutionPlanner",
-        success: false,
-      };
+      return failedPlannerPatch(state, logs, `执行规划异常：${msg}`);
     }
   };
 }
 
-// 重新导出类型
 export type {
   ExecutionPlan,
   FillPlan,

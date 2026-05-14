@@ -1,77 +1,119 @@
-/**
- * ================================================================
- * 文本提取器（集中式 + 可替换策略）
- * ================================================================
- *
- * 设计原则：
- * - 禁止 N+1 SDK 调用
- * - 一次性批量提取所有文本
- * - 策略模式支持可替换实现
- * - 使用 coverage 指标评估提取质量
- */
-
 import type { Document } from "../../../../../services/cliRunner";
 import type { TextExtractionResult } from "../types";
 
-/** 文本提取策略接口 */
+type SdkBlock = Record<string, unknown> & {
+  nodeId?: string;
+  ref?: string;
+  handle?: {
+    ref?: string;
+    nodeId?: string;
+  };
+};
+
+const TEXT_KEYS = ["text", "fullText", "plainText", "textPreview", "content", "value"];
+const CHILD_KEYS = ["children", "paragraphs", "runs", "blocks", "items"];
+
 export interface TextExtractionStrategy {
   name: string;
   extract(doc: Document, tableNodeId: string): Promise<TextExtractionResult>;
 }
 
-/** 策略1: blocks.list + ref 映射 */
+export function extractSdkText(source: unknown): string {
+  return extractSdkTextInternal(source, new Set());
+}
+
+function extractSdkTextInternal(source: unknown, seen: Set<object>): string {
+  if (typeof source === "string") return source;
+  if (!source || typeof source !== "object") return "";
+  if (seen.has(source)) return "";
+  seen.add(source);
+
+  const record = source as Record<string, unknown>;
+  const directText = TEXT_KEYS
+    .map((key) => record[key])
+    .filter((value): value is string => typeof value === "string" && value.trim() !== "");
+
+  if (directText.length > 0) {
+    return directText.join("");
+  }
+
+  const childText: string[] = [];
+  for (const key of CHILD_KEYS) {
+    const child = record[key];
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        const text = extractSdkTextInternal(item, seen).trim();
+        if (text) childText.push(text);
+      }
+    } else {
+      const text = extractSdkTextInternal(child, seen).trim();
+      if (text) childText.push(text);
+    }
+  }
+
+  return childText.join("\n");
+}
+
+function getBlockKey(block: SdkBlock): string | undefined {
+  return block.ref || block.handle?.ref || block.nodeId || block.handle?.nodeId;
+}
+
+function getBlockNodeId(block: SdkBlock): string | undefined {
+  return block.nodeId || block.handle?.nodeId;
+}
+
+function buildResult(
+  blocks: SdkBlock[],
+  method: string,
+  confidenceWhenHasText: number,
+  confidenceWhenEmpty: number
+): TextExtractionResult {
+  const refTextMap = new Map<string, string>();
+  const nodeRefMap = new Map<string, string>();
+  let textCount = 0;
+
+  for (const block of blocks) {
+    const key = getBlockKey(block);
+    const nodeId = getBlockNodeId(block);
+    const text = extractSdkText(block);
+
+    if (nodeId) {
+      nodeRefMap.set(nodeId, key || nodeId);
+    }
+
+    if (!key) continue;
+    refTextMap.set(key, text);
+    if (text.trim() !== "") {
+      textCount++;
+    }
+  }
+
+  const coverage = blocks.length > 0 ? textCount / blocks.length : 0;
+
+  return {
+    refTextMap,
+    nodeRefMap,
+    extractionMethod: method,
+    confidence: coverage > 0 ? confidenceWhenHasText : confidenceWhenEmpty,
+    coverage,
+  };
+}
+
 export class BlockListStrategy implements TextExtractionStrategy {
   name = "block_list";
 
   async extract(doc: Document, tableNodeId: string): Promise<TextExtractionResult> {
-    // 批量获取所有 tableCell blocks
     const cellBlocks = await doc.blocks.list({
       nodeTypes: ["tableCell"],
       limit: 2000,
+      includeText: true,
     } as Record<string, unknown>);
 
-    const blocks = ((cellBlocks as Record<string, unknown>).blocks || []) as Array<{
-      nodeId?: string;
-      ref?: string;
-      text?: string;
-    }>;
-
-    // 构建 nodeRefMap
-    const nodeRefMap = new Map<string, string>();
-    for (const block of blocks) {
-      if (block.nodeId) {
-        nodeRefMap.set(block.nodeId, block.ref || block.nodeId);
-      }
-    }
-
-    // 尝试从 block 获取文本
-    const refTextMap = new Map<string, string>();
-    let textCount = 0;
-    for (const block of blocks) {
-      const key = block.ref || block.nodeId;
-      if (key) {
-        if (block.text && block.text.trim() !== "") {
-          refTextMap.set(key, block.text);
-          textCount++;
-        } else {
-          refTextMap.set(key, "");
-        }
-      }
-    }
-
-    const coverage = blocks.length > 0 ? textCount / blocks.length : 0;
-
-    return {
-      refTextMap,
-      nodeRefMap,
-      extractionMethod: this.name,
-      confidence: coverage > 0 ? 0.8 : 0.3,
-      coverage,
-    };
+    const blocks = ((cellBlocks as Record<string, unknown>).blocks || []) as SdkBlock[];
+    return buildResult(blocks, this.name, 0.85, 0.2);
   }
 }
 
-/** 策略2: query.match 批量获取（仅 complex mode 或 coverage < 0.3） */
 export class QueryMatchStrategy implements TextExtractionStrategy {
   name = "query_match";
 
@@ -81,49 +123,11 @@ export class QueryMatchStrategy implements TextExtractionStrategy {
       require: "any",
     });
 
-    const items = ((result as Record<string, unknown>).items || []) as Array<{
-      text?: string;
-      content?: string;
-      handle?: { ref?: string; nodeId?: string };
-    }>;
-
-    const refTextMap = new Map<string, string>();
-    const nodeRefMap = new Map<string, string>();
-    let textCount = 0;
-
-    for (const item of items) {
-      const ref = item.handle?.ref;
-      const nodeId = item.handle?.nodeId;
-      const key = ref || nodeId;
-      const text = item.text || item.content || "";
-
-      if (key) {
-        if (text.trim() !== "") {
-          refTextMap.set(key, text);
-          textCount++;
-        } else {
-          refTextMap.set(key, "");
-        }
-      }
-
-      if (nodeId) {
-        nodeRefMap.set(nodeId, key || nodeId);
-      }
-    }
-
-    const coverage = items.length > 0 ? textCount / items.length : 0;
-
-    return {
-      refTextMap,
-      nodeRefMap,
-      extractionMethod: this.name,
-      confidence: 0.6,
-      coverage,
-    };
+    const items = ((result as Record<string, unknown>).items || []) as SdkBlock[];
+    return buildResult(items, this.name, 0.6, 0.2);
   }
 }
 
-/** 策略3: 只获取结构，文本标记为 [TEXT_UNAVAILABLE] */
 export class StructureOnlyStrategy implements TextExtractionStrategy {
   name = "structure_only";
 
@@ -131,56 +135,25 @@ export class StructureOnlyStrategy implements TextExtractionStrategy {
     const cellBlocks = await doc.blocks.list({
       nodeTypes: ["tableCell"],
       limit: 2000,
+      includeText: true,
     } as Record<string, unknown>);
 
-    const blocks = ((cellBlocks as Record<string, unknown>).blocks || []) as Array<{
-      nodeId?: string;
-      ref?: string;
-    }>;
-
-    const refTextMap = new Map<string, string>();
-    const nodeRefMap = new Map<string, string>();
-
-    for (const block of blocks) {
-      if (block.nodeId) {
-        const key = block.ref || block.nodeId;
-        nodeRefMap.set(block.nodeId, key);
-        refTextMap.set(key, "");
-      }
-    }
+    const blocks = ((cellBlocks as Record<string, unknown>).blocks || []) as SdkBlock[];
+    const result = buildResult(blocks, this.name, 0.5, 0.5);
 
     return {
-      refTextMap,
-      nodeRefMap,
-      extractionMethod: this.name,
+      ...result,
       confidence: 0.5,
-      coverage: 0,
     };
   }
 }
 
-/** 集中式文本提取器 */
 export class CentralizedTextExtractor {
-  private strategies: TextExtractionStrategy[] = [
-    new BlockListStrategy(),
-    new QueryMatchStrategy(),
-    new StructureOnlyStrategy(),
-  ];
-
-  /**
-   * 提取文本
-   *
-   * 策略选择逻辑：
-   * 1. BlockListStrategy: coverage >= 0.7 或 (coverage >= 0.4 且 confidence >= 0.8)
-   * 2. QueryMatchStrategy: 仅 complex mode 或 coverage < 0.3
-   * 3. StructureOnlyStrategy: fallback
-   */
   async extract(
     doc: Document,
     tableNodeId: string,
     isComplexMode: boolean = false
   ): Promise<TextExtractionResult> {
-    // 策略1: BlockListStrategy
     const blockStrategy = new BlockListStrategy();
     const blockResult = await blockStrategy.extract(doc, tableNodeId);
 
@@ -191,7 +164,6 @@ export class CentralizedTextExtractor {
       return blockResult;
     }
 
-    // 策略2: QueryMatchStrategy（仅 complex mode 或 coverage < 0.3）
     if (isComplexMode || blockResult.coverage < 0.3) {
       const queryStrategy = new QueryMatchStrategy();
       const queryResult = await queryStrategy.extract(doc, tableNodeId);
@@ -201,7 +173,6 @@ export class CentralizedTextExtractor {
       }
     }
 
-    // 策略3: StructureOnlyStrategy（fallback）
     const structureStrategy = new StructureOnlyStrategy();
     return structureStrategy.extract(doc, tableNodeId);
   }

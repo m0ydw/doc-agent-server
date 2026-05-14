@@ -1,21 +1,15 @@
 import { randomUUID } from "crypto";
 import { parseDocument } from "../docAnalyst/parser";
-import type { TableFillAnalysis, ReferenceFieldTemplate, TableCellRef } from "./types";
+import type {
+  DuplicateTemplateGroup,
+  TableFillAnalysis,
+  ReferenceFieldTemplate,
+  TableCellRef,
+} from "./types";
 import { normalizeText, toDocumentTableMap } from "./types";
 import { saveTableFillAnalysis } from "./store";
 
-// ================================================================
-// 类型定义
-// ================================================================
-
-interface TableShape {
-  index: number;
-  rows: number;
-  cols: number;
-  cellCount: number;
-  avgTextLength: number;
-  sampleTexts: string[];
-}
+type TableRole = "key_value_table" | "section_table" | "unknown";
 
 interface TableMapping {
   referenceTableIndex: number;
@@ -29,27 +23,45 @@ interface ColumnDef {
   colIndex: number;
   gridColStart: number;
   gridColEnd: number;
+  nodeId: string;
 }
 
 interface SectionTemplate {
   sectionName: string;
   tableIndex: number;
+  sectionHeaderRowIndex: number;
+  columnHeaderRowIndex: number;
   headerRowIndex: number;
   dataStartRowIndex: number;
   dataEndRowIndex: number;
   columns: ColumnDef[];
 }
 
-// ================================================================
-// 主入口
-// ================================================================
+interface FailedSection {
+  sectionName: string;
+  tableIndex: number;
+  reason: string;
+}
+
+interface RowInfo {
+  row: number;
+  cells: TableCellRef[];
+  nonEmptyCells: TableCellRef[];
+  texts: string[];
+}
+
+const ARRAY_SECTION_NAMES = ["申请人或申请团队", "指导教师"];
+const BASIC_FIELD_NAMES = ["项目名称", "项目类型", "项目负责人", "申报日期"];
+
+const APPLICANT_COLUMNS = ["角色", "姓名", "年级", "学校", "所在院系/专业", "联系电话", "E-mail"];
+const TEACHER_COLUMNS = ["姓名", "年龄", "研究方向", "行政职务/专业技术职务", "手机", "电子邮箱"];
 
 export async function analyzeReferenceAndTargetTables(
   referenceDocId: string,
   targetDocId: string,
   userData: Record<string, unknown>,
 ): Promise<TableFillAnalysis> {
-  console.log(`[DocAnalyst] ========== 开始分析参考/目标文档 ==========`);
+  console.log("[DocAnalyst] ========== 开始分析参考/目标文档 ==========");
   console.log(`[DocAnalyst]   referenceDocId: ${referenceDocId}`);
   console.log(`[DocAnalyst]   targetDocId: ${targetDocId}`);
 
@@ -59,48 +71,49 @@ export async function analyzeReferenceAndTargetTables(
   const target = toDocumentTableMap(targetPayload);
   const failedReasons: string[] = [];
 
-  // 打印表格结构
-  console.log(`[DocAnalyst] Reference tables=${reference.tables.length}`);
-  for (const table of reference.tables) {
-    console.log(`[DocAnalyst]   table ${table.index}: ${table.rows} rows x ${table.cols} cols, ${table.cells.length} cells`);
-  }
-  console.log(`[DocAnalyst] Target tables=${target.tables.length}`);
-  for (const table of target.tables) {
-    console.log(`[DocAnalyst]   table ${table.index}: ${table.rows} rows x ${table.cols} cols, ${table.cells.length} cells`);
+  logTableSummary("Reference", reference.tables);
+  logTableSummary("Target", target.tables);
+  const sanity = validateReferenceTextSanity(reference);
+  if (!sanity.ok) {
+    for (const reason of sanity.failedReasons) {
+      failedReasons.push(reason);
+      console.error(`[DocAnalyst] Text sanity check failed: ${reason}`);
+    }
   }
 
-  // 步骤1: 匹配 reference table 到 target table
   const tableMappings = matchTables(reference, target);
-  console.log(`[DocAnalyst] Table 映射结果:`);
+  console.log("[DocAnalyst] Table 映射结果:");
   for (const mapping of tableMappings) {
-    console.log(`[DocAnalyst]   ref table ${mapping.referenceTableIndex} -> target table ${mapping.targetTableIndex} (相似度=${mapping.similarity.toFixed(2)}, ${mapping.reason})`);
+    console.log(`[DocAnalyst]   ref table ${mapping.referenceTableIndex} -> target table ${mapping.targetTableIndex} (similarity=${mapping.similarity.toFixed(2)}, ${mapping.reason})`);
   }
 
-  // 步骤2: 从参考文档提取 section 模板
-  const sectionTemplates = extractSectionTemplates(reference);
+  for (const table of reference.tables) {
+    if (classifyTableRole(table) === "section_table") {
+      dumpTableMatrix(table);
+    }
+  }
+
+  const { sections: sectionTemplates, failedSections } = extractSectionTemplates(reference);
   console.log(`[DocAnalyst] Section 模板提取结果: ${sectionTemplates.length} 个 section`);
   for (const section of sectionTemplates) {
-    console.log(`[DocAnalyst]   section "${section.sectionName}": table=${section.tableIndex}, headerRow=${section.headerRowIndex}, dataStart=${section.dataStartRowIndex}, columns=[${section.columns.map(c => `${c.fieldName}(${c.colIndex})`).join(", ")}]`);
+    console.log(`[DocAnalyst]   section "${section.sectionName}": table=${section.tableIndex}, sectionHeader=${section.sectionHeaderRowIndex}, columnHeader=${section.columnHeaderRowIndex}, dataStart=${section.dataStartRowIndex}, columns=[${section.columns.map(c => `${c.fieldName}(${c.colIndex})`).join(", ")}]`);
   }
 
-  // 步骤3: 提取字段模板
-  const templates = buildReferenceTemplates(
+  const { templates, missingSections } = buildReferenceTemplates(
     reference.tables.flatMap(table => table.cells),
     userData,
     failedReasons,
     tableMappings,
     sectionTemplates,
     reference,
-    target,
   );
 
-  console.log(`[DocAnalyst] Field templates=${templates.length}, failed=${failedReasons.length}`);
-  if (templates.length === 0) {
-    console.warn(`[DocAnalyst] ⚠️ 未能提取任何字段模板！`);
-    for (const reason of failedReasons.slice(0, 10)) {
-      console.warn(`[DocAnalyst]   - ${reason}`);
-    }
+  const duplicateTemplateGroups = detectDuplicateTemplates(templates);
+  for (const duplicate of duplicateTemplateGroups) {
+    failedReasons.push(`Duplicate template target ${duplicate.targetKey}: ${duplicate.fieldPaths.join(", ")}`);
   }
+
+  console.log(`[DocAnalyst] Field templates=${templates.length}, failed=${failedReasons.length}, duplicates=${duplicateTemplateGroups.length}`);
 
   const analysis: TableFillAnalysis = {
     analysisId: `table_fill_${randomUUID()}`,
@@ -110,6 +123,9 @@ export async function analyzeReferenceAndTargetTables(
     target,
     templates,
     failedReasons,
+    failedSections,
+    missingSections,
+    duplicateTemplateGroups,
     createdAt: new Date().toISOString(),
   };
 
@@ -117,229 +133,241 @@ export async function analyzeReferenceAndTargetTables(
   return analysis;
 }
 
-// ================================================================
-// 步骤1: Table 相似度匹配
-// ================================================================
+function logTableSummary(label: string, tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }>): void {
+  console.log(`[DocAnalyst] ${label} tables=${tables.length}`);
+  for (const table of tables) {
+    console.log(`[DocAnalyst]   table ${table.index}: ${table.rows} rows x ${table.cols} cols, ${table.cells.length} cells, role=${classifyTableRole(table)}`);
+  }
+}
 
-function matchTables(reference: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> }, target: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> }): TableMapping[] {
-  const refShapes = reference.tables.map(t => extractTableShape(t));
-  const targetShapes = target.tables.map(t => extractTableShape(t));
+function validateReferenceTextSanity(reference: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> }): { ok: boolean; failedReasons: string[] } {
+  const table1 = reference.tables.find(table => table.index === 1);
+  const failedReasons: string[] = [];
+  if (!table1) {
+    return { ok: false, failedReasons: ["REFERENCE_TABLE_1_NOT_FOUND"] };
+  }
 
+  const nonEmptyCellCount = table1.cells.filter(cell => normalizeText(cell.text)).length;
+  if (nonEmptyCellCount === 0) {
+    failedReasons.push("REFERENCE_TABLE_1_TEXT_EXTRACTION_EMPTY");
+  }
+
+  const allText = normalizeComparable(table1.cells.map(cell => cell.text).join(" "));
+  const requiredTerms = [
+    "申请人或申请团队",
+    "指导教师",
+    "项目名称",
+    "姓名",
+    "年级",
+    "学校",
+    "联系电话",
+    "email",
+  ];
+
+  for (const term of requiredTerms) {
+    if (!allText.includes(normalizeComparable(term))) {
+      failedReasons.push(`REFERENCE_TEXT_MISSING:${term}`);
+    }
+  }
+
+  return { ok: failedReasons.length === 0, failedReasons };
+}
+
+function dumpTableMatrix(table: { index: number; rows: number; cols: number; cells: TableCellRef[] }): void {
+  const rows = buildRows(table.cells);
+  console.log(`[DocAnalyst] Table ${table.index} matrix dump:`);
+  for (let row = 0; row < table.rows; row++) {
+    const info = rows.get(row) || { row, cells: [], nonEmptyCells: [], texts: [] };
+    const textLine = Array.from({ length: table.cols }, (_, col) => {
+      const cell = info.cells.find(c => c.col === col);
+      return normalizeText(cell?.text || "");
+    }).join(" | ");
+    const gridLine = info.cells
+      .sort((a, b) => a.col - b.col)
+      .map(cell => `[${cell.col}-${cell.gridColEnd}] "${normalizeText(cell.text)}"`)
+      .join(", ");
+    console.log(`[DocAnalyst]   row ${row}: ${textLine}`);
+    console.log(`[DocAnalyst]     nonEmpty=${info.nonEmptyCells.length}, texts=[${info.texts.join(", ")}], grid=${gridLine}`);
+  }
+}
+
+function matchTables(
+  reference: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> },
+  target: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> },
+): TableMapping[] {
   const mappings: TableMapping[] = [];
   const usedTargets = new Set<number>();
 
-  for (const refShape of refShapes) {
-    let bestMatch: TableMapping | null = null;
+  for (const refTable of reference.tables) {
+    let best: TableMapping | null = null;
     let bestScore = -1;
-
-    for (const targetShape of targetShapes) {
-      if (usedTargets.has(targetShape.index)) continue;
-
-      const similarity = calculateTableSimilarity(refShape, targetShape);
-      if (similarity > bestScore) {
-        bestScore = similarity;
-        bestMatch = {
-          referenceTableIndex: refShape.index,
-          targetTableIndex: targetShape.index,
-          similarity,
-          reason: `rows=${targetShape.rows}/${refShape.rows}, cols=${targetShape.cols}/${refShape.cols}, cells=${targetShape.cellCount}/${refShape.cellCount}`,
+    for (const targetTable of target.tables) {
+      if (usedTargets.has(targetTable.index)) continue;
+      const score = calculateTableSimilarity(refTable, targetTable);
+      if (score > bestScore) {
+        bestScore = score;
+        best = {
+          referenceTableIndex: refTable.index,
+          targetTableIndex: targetTable.index,
+          similarity: score,
+          reason: `rows=${targetTable.rows}/${refTable.rows}, cols=${targetTable.cols}/${refTable.cols}, cells=${targetTable.cells.length}/${refTable.cells.length}`,
         };
       }
     }
 
-    if (bestMatch) {
-      mappings.push(bestMatch);
-      usedTargets.add(bestMatch.targetTableIndex);
+    if (best) {
+      mappings.push(best);
+      usedTargets.add(best.targetTableIndex);
     }
   }
 
   return mappings;
 }
 
-function extractTableShape(table: { index: number; rows: number; cols: number; cells: TableCellRef[] }): TableShape {
-  const texts = table.cells.map(c => c.text).filter(Boolean);
-  return {
-    index: table.index,
-    rows: table.rows,
-    cols: table.cols,
-    cellCount: table.cells.length,
-    avgTextLength: texts.length > 0 ? texts.reduce((sum, t) => sum + t.length, 0) / texts.length : 0,
-    sampleTexts: texts.slice(0, 5),
-  };
-}
-
-function calculateTableSimilarity(ref: TableShape, target: TableShape): number {
-  // 行数相似度 (权重 0.3)
+function calculateTableSimilarity(
+  ref: { rows: number; cols: number; cells: TableCellRef[] },
+  target: { rows: number; cols: number; cells: TableCellRef[] },
+): number {
   const rowSimilarity = 1 - Math.abs(ref.rows - target.rows) / Math.max(ref.rows, target.rows, 1);
-
-  // 列数相似度 (权重 0.3)
   const colSimilarity = 1 - Math.abs(ref.cols - target.cols) / Math.max(ref.cols, target.cols, 1);
-
-  // cell 数量相似度 (权重 0.2)
-  const cellSimilarity = 1 - Math.abs(ref.cellCount - target.cellCount) / Math.max(ref.cellCount, target.cellCount, 1);
-
-  // 平均文本长度相似度 (权重 0.1)
-  const textLenSimilarity = ref.avgTextLength > 0 && target.avgTextLength > 0
-    ? 1 - Math.abs(ref.avgTextLength - target.avgTextLength) / Math.max(ref.avgTextLength, target.avgTextLength)
-    : 0.5;
-
-  // 文本内容重叠度 (权重 0.1)
-  const refTexts = new Set(ref.sampleTexts.map(normalizeComparable));
-  const targetTexts = new Set(target.sampleTexts.map(normalizeComparable));
-  let overlapCount = 0;
-  for (const t of refTexts) {
-    if (targetTexts.has(t)) overlapCount++;
-  }
-  const contentSimilarity = refTexts.size > 0 ? overlapCount / refTexts.size : 0.5;
-
-  return rowSimilarity * 0.3 + colSimilarity * 0.3 + cellSimilarity * 0.2 + textLenSimilarity * 0.1 + contentSimilarity * 0.1;
+  const cellSimilarity = 1 - Math.abs(ref.cells.length - target.cells.length) / Math.max(ref.cells.length, target.cells.length, 1);
+  const roleSimilarity = classifyTableRole(ref) === classifyTableRole(target) ? 1 : 0;
+  return rowSimilarity * 0.35 + colSimilarity * 0.35 + cellSimilarity * 0.2 + roleSimilarity * 0.1;
 }
 
-// ================================================================
-// 步骤2: Section 模板提取
-// ================================================================
+function classifyTableRole(table: { rows: number; cols: number; cells: TableCellRef[] }): TableRole {
+  if (table.cols <= 3 && table.rows <= 10) return "key_value_table";
+  if (table.cols >= 5 && table.rows >= 6) return "section_table";
+  return "unknown";
+}
 
-function extractSectionTemplates(tableMap: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> }): SectionTemplate[] {
+function extractSectionTemplates(tableMap: { tables?: Array<{ index: number; rows: number; cols: number; cells?: TableCellRef[] }> }): { sections: SectionTemplate[]; failedSections: FailedSection[] } {
   const sections: SectionTemplate[] = [];
+  const failedSections: FailedSection[] = [];
 
-  for (const table of tableMap.tables) {
-    if (table.rows < 3 || table.cols < 2) continue; // 太小的表格跳过
-
-    // 按行分组
-    const rowMap = new Map<number, TableCellRef[]>();
-    for (const cell of table.cells) {
-      if (!rowMap.has(cell.row)) rowMap.set(cell.row, []);
-      rowMap.get(cell.row)!.push(cell);
-    }
-
-    // 检测 section 边界：找到跨越大部分列的合并单元格（section 标题）
-    const sectionHeaders: Array<{ row: number; text: string }> = [];
-    for (let row = 0; row < table.rows; row++) {
-      const rowCells = rowMap.get(row) || [];
-      if (rowCells.length === 0) continue;
-
-      // 检查是否有合并单元格跨越大部分列
-      const wideCell = rowCells.find(c => c.colspan >= table.cols * 0.5);
-      if (wideCell && wideCell.text) {
-        const text = normalizeText(wideCell.text);
-        // 排除表头行（如 "角色 | 姓名 | 年级 | ..."）
-        const isHeaderRow = rowCells.filter(c => c.text).length >= 3;
-        if (!isHeaderRow && text.length > 1) {
-          sectionHeaders.push({ row, text });
-        }
-      }
-    }
-
-    // 如果没有检测到 section 辇界，整个表作为一个 section
-    if (sectionHeaders.length === 0) {
-      // 尝试从第一行提取列定义
-      const headerRow = findLikelyHeaderRow(table.cells, table.rows, table.cols);
-      if (headerRow !== null) {
-        const columns = extractColumnDefs(table.cells, headerRow);
-        if (columns.length > 0) {
-          sections.push({
-            sectionName: `table_${table.index}`,
-            tableIndex: table.index,
-            headerRowIndex: headerRow,
-            dataStartRowIndex: headerRow + 1,
-            dataEndRowIndex: table.rows - 1,
-            columns,
-          });
-        }
-      }
+  for (const table of tableMap.tables ?? []) {
+    if (!table || !Array.isArray(table.cells)) {
+      failedSections.push({ sectionName: `table_${table?.index ?? "unknown"}`, tableIndex: table?.index ?? -1, reason: "INVALID_TABLE_CELLS" });
       continue;
     }
 
-    // 为每个 section 提取列定义
-    for (let i = 0; i < sectionHeaders.length; i++) {
-      const header = sectionHeaders[i];
-      const nextHeaderRow = i + 1 < sectionHeaders.length ? sectionHeaders[i + 1].row : table.rows;
-      const dataStartRow = header.row + 1;
-      const dataEndRow = nextHeaderRow - 1;
+    if (classifyTableRole({ ...table, cells: table.cells }) !== "section_table") {
+      continue;
+    }
 
-      // 找到 section 内的表头行（通常是 section 标题的下一行）
-      const headerRow = findLikelyHeaderRowInSection(table.cells, dataStartRow, dataEndRow);
-      const columns = headerRow !== null ? extractColumnDefs(table.cells, headerRow) : [];
+    const concreteTable = { ...table, cells: table.cells };
+    const rows = buildRows(concreteTable.cells);
+    const candidates = findSectionHeaderCandidates(concreteTable, rows);
+    if (candidates.length === 0) {
+      failedSections.push({ sectionName: `table_${table.index}`, tableIndex: table.index, reason: "SECTION_TEMPLATE_NOT_FOUND" });
+      continue;
+    }
+
+    const sorted = candidates.sort((a, b) => a.columnHeaderRowIndex - b.columnHeaderRowIndex);
+    for (let index = 0; index < sorted.length; index++) {
+      const current = sorted[index];
+      const next = sorted[index + 1];
+      const columns = extractColumnDefs(table.cells, current.columnHeaderRowIndex);
+      if (columns.length === 0) {
+        failedSections.push({ sectionName: current.sectionName, tableIndex: table.index, reason: "HEADER_COLUMNS_NOT_FOUND" });
+        continue;
+      }
 
       sections.push({
-        sectionName: header.text,
+        sectionName: current.sectionName,
         tableIndex: table.index,
-        headerRowIndex: headerRow ?? dataStartRow,
-        dataStartRowIndex: (headerRow ?? dataStartRow) + 1,
-        dataEndRowIndex: dataEndRow,
+        sectionHeaderRowIndex: current.sectionHeaderRowIndex,
+        columnHeaderRowIndex: current.columnHeaderRowIndex,
+        headerRowIndex: current.columnHeaderRowIndex,
+        dataStartRowIndex: current.columnHeaderRowIndex + 1,
+        dataEndRowIndex: next ? Math.max(current.columnHeaderRowIndex + 1, next.sectionHeaderRowIndex - 1) : table.rows - 1,
         columns,
       });
     }
   }
 
-  return sections;
+  return { sections, failedSections };
 }
 
-function findLikelyHeaderRow(cells: TableCellRef[], tableRows: number, tableCols: number): number | null {
-  const rowMap = new Map<number, TableCellRef[]>();
-  for (const cell of cells) {
-    if (!cell.row) rowMap.set(cell.row, []);
-    rowMap.get(cell.row)!.push(cell);
-  }
+function findSectionHeaderCandidates(
+  table: { index: number; rows: number; cols: number; cells: TableCellRef[] },
+  rows: Map<number, RowInfo>,
+): Array<{ sectionName: string; sectionHeaderRowIndex: number; columnHeaderRowIndex: number; score: number }> {
+  const bestBySection = new Map<string, { sectionName: string; sectionHeaderRowIndex: number; columnHeaderRowIndex: number; score: number }>();
 
-  // 查找第一行有多个短文本的行作为表头
-  for (let row = 0; row < Math.min(tableRows, 5); row++) {
-    const rowCells = rowMap.get(row) || [];
-    const nonEmptyCells = rowCells.filter(c => c.text);
-    if (nonEmptyCells.length >= 2) {
-      const avgLen = nonEmptyCells.reduce((sum, c) => sum + c.text.length, 0) / nonEmptyCells.length;
-      if (avgLen < 15) { // 短文本 = 表头
-        return row;
+  for (let row = 0; row < table.rows; row++) {
+    const info = rows.get(row);
+    if (!info || info.nonEmptyCells.length === 0) continue;
+
+    const applicantScore = countHeaderMatches(info.texts, APPLICANT_COLUMNS);
+    const teacherScore = countHeaderMatches(info.texts, TEACHER_COLUMNS);
+    const candidates: Array<{ sectionName: string; score: number }> = [];
+    if (applicantScore >= 3) candidates.push({ sectionName: "申请人或申请团队", score: applicantScore });
+    if (teacherScore >= 3) candidates.push({ sectionName: "指导教师", score: teacherScore });
+
+    for (const candidate of candidates) {
+      const sectionHeaderRowIndex = findSectionTitleRow(rows, row, candidate.sectionName);
+      const existing = bestBySection.get(candidate.sectionName);
+      if (!existing || candidate.score > existing.score) {
+        bestBySection.set(candidate.sectionName, {
+          sectionName: candidate.sectionName,
+          sectionHeaderRowIndex,
+          columnHeaderRowIndex: row,
+          score: candidate.score,
+        });
       }
     }
+  }
+
+  return [...bestBySection.values()];
+}
+
+function findSectionTitleRow(rows: Map<number, RowInfo>, headerRow: number, sectionName: string): number {
+  const wanted = normalizeComparable(sectionName);
+  for (let row = headerRow - 1; row >= Math.max(0, headerRow - 4); row--) {
+    const info = rows.get(row);
+    if (!info || info.nonEmptyCells.length === 0) continue;
+    const joined = normalizeComparable(info.texts.join(""));
+    if (joined.includes(wanted) || wanted.includes(joined)) return row;
+    if (info.nonEmptyCells.length <= 2) return row;
+  }
+  return Math.max(0, headerRow - 1);
+}
+
+function findLikelyHeaderRow(cells: TableCellRef[] | undefined, tableRows: number, tableCols: number): number | null {
+  if (!Array.isArray(cells) || cells.length === 0 || tableRows <= 0 || tableCols <= 0) return null;
+  const rows = buildRows(cells);
+  for (let row = 0; row < Math.min(tableRows, 5); row++) {
+    const info = rows.get(row);
+    if (!info || info.nonEmptyCells.length === 0) continue;
+    if (info.nonEmptyCells.length >= 2 && averageTextLength(info.nonEmptyCells) < 15) return row;
   }
   return null;
 }
 
-function findLikelyHeaderRowInSection(cells: TableCellRef[], startRow: number, endRow: number): number | null {
-  const rowMap = new Map<number, TableCellRef[]>();
-  for (const cell of cells) {
-    if (cell.row >= startRow && cell.row <= endRow) {
-      if (!rowMap.has(cell.row)) rowMap.set(cell.row, []);
-      rowMap.get(cell.row)!.push(cell);
-    }
-  }
-
-  // 在 section 内查找表头行
+function findLikelyHeaderRowInSection(cells: TableCellRef[] | undefined, startRow: number, endRow: number): number | null {
+  if (!Array.isArray(cells) || cells.length === 0 || startRow > endRow) return null;
+  const rows = buildRows(cells);
   for (let row = startRow; row <= Math.min(endRow, startRow + 3); row++) {
-    const rowCells = rowMap.get(row) || [];
-    const nonEmptyCells = rowCells.filter(c => c.text);
-    if (nonEmptyCells.length >= 2) {
-      const avgLen = nonEmptyCells.reduce((sum, c) => sum + c.text.length, 0) / nonEmptyCells.length;
-      if (avgLen < 15) {
-        return row;
-      }
-    }
+    const info = rows.get(row);
+    if (!info || info.nonEmptyCells.length === 0) continue;
+    if (info.nonEmptyCells.length >= 2 && averageTextLength(info.nonEmptyCells) < 15) return row;
   }
   return null;
 }
 
 function extractColumnDefs(cells: TableCellRef[], headerRow: number): ColumnDef[] {
-  const rowCells = cells.filter(c => c.row === headerRow).sort((a, b) => a.col - b.col);
-  const columns: ColumnDef[] = [];
-
-  for (const cell of rowCells) {
-    if (cell.text) {
-      columns.push({
-        fieldName: normalizeText(cell.text),
-        colIndex: cell.col,
-        gridColStart: cell.col,
-        gridColEnd: cell.col + cell.colspan,
-      });
-    }
-  }
-
-  return columns;
+  return cells
+    .filter(cell => cell.row === headerRow && normalizeText(cell.text))
+    .sort((a, b) => a.col - b.col)
+    .map(cell => ({
+      fieldName: normalizeText(cell.text),
+      colIndex: cell.col,
+      gridColStart: cell.col,
+      gridColEnd: cell.gridColEnd,
+      nodeId: cell.nodeId,
+    }));
 }
-
-// ================================================================
-// 步骤3: 字段模板提取
-// ================================================================
 
 function buildReferenceTemplates(
   cells: TableCellRef[],
@@ -348,280 +376,227 @@ function buildReferenceTemplates(
   tableMappings: TableMapping[],
   sectionTemplates: SectionTemplate[],
   reference: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> },
-  target: { tables: Array<{ index: number; rows: number; cols: number; cells: TableCellRef[] }> },
-): ReferenceFieldTemplate[] {
+): { templates: ReferenceFieldTemplate[]; missingSections: string[] } {
   const templates: ReferenceFieldTemplate[] = [];
-  const textCells = cells.filter(cell => normalizeText(cell.text));
+  const missingSections: string[] = [];
   const flatFields = flattenUserData(userData);
+  const tableMappingByRef = new Map(tableMappings.map(mapping => [mapping.referenceTableIndex, mapping.targetTableIndex]));
+  const tableRoles = new Map(reference.tables.map(table => [table.index, classifyTableRole(table)]));
+  const pathGroups = groupFields(flatFields);
 
-  console.log(`[DocAnalyst] 开始模板匹配，共 ${flatFields.length} 个字段`);
-
-  // 构建 tableMapping 查找表
-  const tableMappingByRef = new Map<number, number>();
-  for (const mapping of tableMappings) {
-    tableMappingByRef.set(mapping.referenceTableIndex, mapping.targetTableIndex);
-  }
-
-  // 按路径前缀分组
-  const pathGroups = new Map<string, Array<{ path: string; value: string }>>();
-  for (const field of flatFields) {
-    const pathParts = field.path.split(".");
-    const isArrayPath = pathParts.length >= 2 && !isNaN(Number(pathParts[1]));
-    const groupKey = isArrayPath ? pathParts[0] : field.path;
-
-    if (!pathGroups.has(groupKey)) pathGroups.set(groupKey, []);
-    pathGroups.get(groupKey)!.push(field);
-  }
-
-  console.log(`[DocAnalyst] 字段分组完成，共 ${pathGroups.size} 组`);
+  console.log(`[DocAnalyst] 开始模板匹配，共 ${flatFields.length} 个字段，${pathGroups.size} 个分组`);
 
   for (const [groupKey, groupFields] of pathGroups) {
-    // 数组路径处理
-    if (groupKey !== groupFields[0].path) {
-      processArrayGroup(groupKey, groupFields, cells, templates, failedReasons, sectionTemplates, tableMappingByRef);
+    const isArrayGroup = groupKey !== groupFields[0].path;
+    if (isArrayGroup) {
+      const section = findMatchingSection(groupKey, sectionTemplates);
+      if (!section) {
+        console.warn(`[DocAnalyst] 未找到 section 模板: ${groupKey}`);
+        missingSections.push(groupKey);
+        for (const field of groupFields) failedReasons.push(`SECTION_TEMPLATE_NOT_FOUND for field: ${field.path}`);
+        continue;
+      }
+      processArrayGroupWithSection(groupFields, section, cells, templates, failedReasons, tableMappingByRef);
       continue;
     }
 
-    // 普通路径处理
     for (const field of groupFields) {
-      processSimpleField(field, cells, textCells, templates, failedReasons, tableMappingByRef);
+      processSimpleField(field, cells, templates, failedReasons, tableMappingByRef, tableRoles);
     }
   }
 
-  return templates;
+  return { templates, missingSections: [...new Set(missingSections)] };
 }
 
-// ================================================================
-// 普通字段处理
-// ================================================================
+function groupFields(fields: Array<{ path: string; value: string }>): Map<string, Array<{ path: string; value: string }>> {
+  const groups = new Map<string, Array<{ path: string; value: string }>>();
+  for (const field of fields) {
+    const parts = field.path.split(".");
+    const isArrayPath = parts.length >= 2 && Number.isFinite(Number(parts[1]));
+    const key = isArrayPath ? parts[0] : field.path;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(field);
+  }
+  return groups;
+}
 
 function processSimpleField(
   field: { path: string; value: string },
   cells: TableCellRef[],
-  textCells: TableCellRef[],
   templates: ReferenceFieldTemplate[],
   failedReasons: string[],
   tableMappingByRef: Map<number, number>,
+  tableRoles: Map<number, TableRole>,
 ): void {
-  // 策略1: 直接文本匹配（置信度 0.96）
-  const direct = findCellByText(textCells, field.value);
-  if (direct) {
-    const mappedTable = tableMappingByRef.get(direct.tableIndex) ?? direct.tableIndex;
-    console.log(`[DocAnalyst] 直接文本匹配: ${field.path} -> ref table=${direct.tableIndex} -> target table=${mappedTable}, row=${direct.row}, col=${direct.col}`);
-    templates.push(toTemplate(field.path, field.value, direct, mappedTable, 0.96, "matched by reference value text"));
-    return;
-  }
+  const basicCells = cells.filter(cell => tableRoles.get(cell.tableIndex) === "key_value_table");
+  const strategies = [
+    () => findByLabelAndPosition(basicCells, field.path),
+    () => findSameCellKeyValue(basicCells, field.path),
+    () => findHorizontalMultiPairRow(basicCells, field.path),
+  ];
 
-  // 策略2: 标签+位置匹配（置信度 0.88）
-  const labelBased = findByLabelAndPosition(cells, field.path);
-  if (labelBased) {
-    const mappedTable = tableMappingByRef.get(labelBased.tableIndex) ?? labelBased.tableIndex;
-    console.log(`[DocAnalyst] 标签位置匹配: ${field.path} -> ref table=${labelBased.tableIndex} -> target table=${mappedTable}, row=${labelBased.row}, col=${labelBased.col}`);
-    templates.push(toTemplate(field.path, field.value, labelBased, mappedTable, 0.88, "matched by reference label neighborhood"));
-    return;
-  }
-
-  // 策略3: same-cell key-value 匹配（置信度 0.85）
-  const sameCell = findSameCellKeyValue(cells, field.path, field.value);
-  if (sameCell) {
-    const mappedTable = tableMappingByRef.get(sameCell.tableIndex) ?? sameCell.tableIndex;
-    console.log(`[DocAnalyst] same-cell 匹配: ${field.path} -> ref table=${sameCell.tableIndex} -> target table=${mappedTable}, row=${sameCell.row}, col=${sameCell.col}`);
-    templates.push(toTemplate(field.path, field.value, sameCell, mappedTable, 0.85, "matched by same-cell key-value pattern"));
-    return;
-  }
-
-  // 策略4: horizontal multi-pair row 匹配（置信度 0.80）
-  const horizontalMulti = findHorizontalMultiPairRow(cells, field.path, field.value);
-  if (horizontalMulti) {
-    const mappedTable = tableMappingByRef.get(horizontalMulti.tableIndex) ?? horizontalMulti.tableIndex;
-    console.log(`[DocAnalyst] 水平多对匹配: ${field.path} -> ref table=${horizontalMulti.tableIndex} -> target table=${mappedTable}, row=${horizontalMulti.row}, col=${horizontalMulti.col}`);
-    templates.push(toTemplate(field.path, field.value, horizontalMulti, mappedTable, 0.80, "matched by horizontal multi-pair row"));
-    return;
-  }
-
-  console.warn(`[DocAnalyst] ⚠️ 所有匹配策略失败: ${field.path}`);
-  failedReasons.push(`No reference position template for field: ${field.path}`);
-}
-
-// ================================================================
-// 数组字段处理
-// ================================================================
-
-function processArrayGroup(
-  groupKey: string,
-  groupFields: Array<{ path: string; value: string }>,
-  cells: TableCellRef[],
-  templates: ReferenceFieldTemplate[],
-  failedReasons: string[],
-  sectionTemplates: SectionTemplate[],
-  tableMappingByRef: Map<number, number>,
-): void {
-  console.log(`[DocAnalyst] 处理数组组: ${groupKey} (${groupFields.length} 个字段)`);
-
-  // 尝试匹配 section 模板
-  const section = findMatchingSection(groupKey, sectionTemplates);
-  if (section) {
-    console.log(`[DocAnalyst] 匹配到 section: "${section.sectionName}" (table=${section.tableIndex}, headerRow=${section.headerRowIndex}, dataStart=${section.dataStartRowIndex})`);
-    processArrayGroupWithSection(groupKey, groupFields, section, templates, failedReasons, tableMappingByRef);
-    return;
-  }
-
-  // Fallback: 使用旧的表头匹配逻辑
-  console.log(`[DocAnalyst] 未匹配到 section，使用 fallback 表头匹配`);
-  const headerCell = findHeaderRow(cells, groupKey);
-  if (headerCell) {
-    processArrayGroupWithHeader(groupKey, groupFields, cells, headerCell, templates, failedReasons, tableMappingByRef);
-    return;
-  }
-
-  console.warn(`[DocAnalyst] ⚠️ 未找到表头: ${groupKey}`);
-  for (const field of groupFields) {
-    failedReasons.push(`No reference position template for field: ${field.path}`);
-  }
-}
-
-function findMatchingSection(groupKey: string, sectionTemplates: SectionTemplate[]): SectionTemplate | null {
-  const canonicalKey = normalizeComparable(groupKey);
-
-  // 精确匹配
-  for (const section of sectionTemplates) {
-    if (normalizeComparable(section.sectionName) === canonicalKey) {
-      return section;
+  for (const strategy of strategies) {
+    const match = strategy();
+    if (match) {
+      const targetTable = tableMappingByRef.get(match.tableIndex) ?? match.tableIndex;
+      templates.push(toTemplate(field.path, field.value, match, targetTable, 0.9, "matched by key-value table layout"));
+      return;
     }
   }
 
-  // 模糊匹配
-  for (const section of sectionTemplates) {
-    const sectionName = normalizeComparable(section.sectionName);
-    if (sectionName.includes(canonicalKey) || canonicalKey.includes(sectionName)) {
-      return section;
-    }
-  }
-
-  return null;
+  failedReasons.push(`No key-value table template for field: ${field.path}`);
 }
 
 function processArrayGroupWithSection(
-  groupKey: string,
   groupFields: Array<{ path: string; value: string }>,
   section: SectionTemplate,
+  cells: TableCellRef[],
   templates: ReferenceFieldTemplate[],
   failedReasons: string[],
   tableMappingByRef: Map<number, number>,
 ): void {
   const mappedTable = tableMappingByRef.get(section.tableIndex) ?? section.tableIndex;
+  console.log(`[DocAnalyst] 匹配到 section: "${section.sectionName}" (table=${section.tableIndex}, headerRow=${section.columnHeaderRowIndex}, dataStart=${section.dataStartRowIndex})`);
 
   for (const field of groupFields) {
-    const pathParts = field.path.split(".");
-    const rowIndex = Number(pathParts[1]);
-    const columnName = pathParts[pathParts.length - 1];
-
-    // 在 section 的列定义中查找列
-    const column = findMatchingColumn(columnName, section.columns);
-    if (column) {
-      const targetRow = section.dataStartRowIndex + rowIndex;
-      const targetCol = column.colIndex;
-      console.log(`[DocAnalyst] section 列映射: ${field.path} -> ref table=${section.tableIndex} -> target table=${mappedTable}, row=${targetRow}, col=${targetCol} (列 "${column.fieldName}")`);
-
-      // 创建一个虚拟的 cell 用于模板
-      const virtualCell: TableCellRef = {
-        tableIndex: section.tableIndex,
-        row: targetRow,
-        col: targetCol,
-        ref: `virtual_${field.path}`,
-        nodeId: `virtual_${field.path}`,
-        text: field.value,
-        rowspan: 1,
-        colspan: 1,
-        gridColEnd: targetCol + 1,
-      };
-
-      templates.push(toTemplate(field.path, field.value, virtualCell, mappedTable, 0.82, `matched by section "${section.sectionName}" column "${column.fieldName}"`));
-    } else {
-      console.warn(`[DocAnalyst] ⚠️ 未找到列: ${columnName} in section "${section.sectionName}"`);
-      failedReasons.push(`No column match for field: ${field.path} in section "${section.sectionName}"`);
+    const parts = field.path.split(".");
+    const rowOffset = Number(parts[1]);
+    const columnName = parts[parts.length - 1];
+    if (!Number.isFinite(rowOffset)) {
+      failedReasons.push(`Invalid array row index for field: ${field.path}`);
+      continue;
     }
+
+    const column = findMatchingColumn(columnName, section.columns);
+    if (!column) {
+      failedReasons.push(`No column match for field: ${field.path} in section "${section.sectionName}"`);
+      continue;
+    }
+
+    const row = section.dataStartRowIndex + rowOffset;
+    if (row > section.dataEndRowIndex) {
+      failedReasons.push(`No data row for field: ${field.path} in section "${section.sectionName}"`);
+      continue;
+    }
+
+    const referenceCell = findCellAt(cells, section.tableIndex, row, column.colIndex) || {
+      tableIndex: section.tableIndex,
+      row,
+      col: column.colIndex,
+      ref: `virtual_${field.path}`,
+      nodeId: column.nodeId,
+      text: field.value,
+      rowspan: 1,
+      colspan: 1,
+      gridColEnd: column.gridColEnd,
+    };
+
+    templates.push(toTemplate(field.path, field.value, referenceCell, mappedTable, 0.92, `matched by section "${section.sectionName}" column "${column.fieldName}"`));
   }
+}
+
+function findMatchingSection(groupKey: string, sections: SectionTemplate[]): SectionTemplate | null {
+  const wanted = normalizeComparable(groupKey);
+  return sections.find(section => {
+    const name = normalizeComparable(section.sectionName);
+    return name === wanted || name.includes(wanted) || wanted.includes(name);
+  }) || null;
 }
 
 function findMatchingColumn(columnName: string, columns: ColumnDef[]): ColumnDef | null {
-  const canonicalName = normalizeComparable(columnName);
+  const wanted = normalizeComparable(columnName);
+  const aliases = columnAliases(columnName).map(normalizeComparable);
+  return columns.find(column => {
+    const actual = normalizeComparable(column.fieldName);
+    return actual === wanted
+      || aliases.includes(actual)
+      || aliases.some(alias => actual.includes(alias) || alias.includes(actual))
+      || actual.includes(wanted)
+      || wanted.includes(actual);
+  }) || null;
+}
 
-  // 精确匹配
-  for (const col of columns) {
-    if (normalizeComparable(col.fieldName) === canonicalName) {
-      return col;
-    }
-  }
-
-  // 模糊匹配
-  for (const col of columns) {
-    const colName = normalizeComparable(col.fieldName);
-    if (colName.includes(canonicalName) || canonicalName.includes(colName)) {
-      return col;
-    }
-  }
-
-  // 同义词匹配
-  const synonyms: Record<string, string[]> = {
-    "email": ["e-mail", "邮箱", "电子邮箱"],
-    "phone": ["手机", "电话", "联系电话"],
-    "name": ["姓名"],
-    "role": ["角色"],
-    "grade": ["年级"],
-    "school": ["学校"],
-    "department": ["院系", "专业", "所在院系/专业"],
-    "age": ["年龄"],
-    "research": ["研究方向"],
-    "position": ["职务", "行政职务", "专业技术职务", "行政职务/专业技术职务"],
+function columnAliases(columnName: string): string[] {
+  const key = normalizeComparable(columnName);
+  const map: Record<string, string[]> = {
+    "角色": ["角色"],
+    "姓名": ["姓名", "名字", "name"],
+    "年级": ["年级"],
+    "学校": ["学校"],
+    "所在院系专业": ["所在院系专业", "所在院系", "院系专业", "院系", "专业"],
+    "联系电话": ["联系电话", "手机", "电话", "联系方式"],
+    "email": ["email", "e-mail", "电子邮箱", "邮箱"],
+    "电子邮箱": ["电子邮箱", "邮箱", "email", "e-mail"],
+    "年龄": ["年龄"],
+    "研究方向": ["研究方向"],
+    "行政职务专业技术职务": ["行政职务专业技术职务", "行政职务", "专业技术职务", "职务"],
+    "手机": ["手机", "联系电话", "电话"],
   };
-
-  for (const [key, syns] of Object.entries(synonyms)) {
-    if (normalizeComparable(key) === canonicalName || syns.some(s => normalizeComparable(s) === canonicalName)) {
-      for (const col of columns) {
-        const colName = normalizeComparable(col.fieldName);
-        if (colName === key || syns.some(s => normalizeComparable(s) === colName)) {
-          return col;
-        }
-      }
-    }
-  }
-
-  return null;
+  return map[key] || [columnName];
 }
 
-function processArrayGroupWithHeader(
-  groupKey: string,
-  groupFields: Array<{ path: string; value: string }>,
-  cells: TableCellRef[],
-  headerCell: TableCellRef,
-  templates: ReferenceFieldTemplate[],
-  failedReasons: string[],
-  tableMappingByRef: Map<number, number>,
-): void {
-  const mappedTable = tableMappingByRef.get(headerCell.tableIndex) ?? headerCell.tableIndex;
-  console.log(`[DocAnalyst] 表头匹配: headerRow=${headerCell.row}, col=${headerCell.col}, text="${headerCell.text}"`);
-
-  for (const field of groupFields) {
-    const pathParts = field.path.split(".");
-    const rowIndex = Number(pathParts[1]);
-    const columnName = pathParts[pathParts.length - 1];
-
-    const template = findByArrayTablePositionWithHeader(cells, headerCell, rowIndex, columnName, field.value);
-    if (template) {
-      const cellMappedTable = tableMappingByRef.get(template.tableIndex) ?? template.tableIndex;
-      console.log(`[DocAnalyst] 数组字段匹配: ${field.path} -> ref table=${template.tableIndex} -> target table=${cellMappedTable}, row=${template.row}, col=${template.col}`);
-      templates.push(toTemplate(field.path, field.value, template, cellMappedTable, 0.82, "matched by repeated table header position"));
-    } else {
-      console.warn(`[DocAnalyst] ⚠️ 数组字段匹配失败: ${field.path}`);
-      failedReasons.push(`No reference position template for field: ${field.path}`);
-    }
-  }
+function findByLabelAndPosition(cells: TableCellRef[], fieldPath: string): TableCellRef | undefined {
+  const label = findLabelCell(cells, fieldPath);
+  if (!label) return undefined;
+  const sameTable = cells.filter(cell => cell.tableIndex === label.tableIndex);
+  return sameTable
+    .filter(cell => cell.row === label.row && cell.col > label.col && normalizeText(cell.text) && !isLikelyLabelCell(cell))
+    .sort((a, b) => a.col - b.col)[0];
 }
 
-// ================================================================
-// 辅助函数
-// ================================================================
+function findSameCellKeyValue(cells: TableCellRef[], fieldPath: string): TableCellRef | undefined {
+  const key = normalizeComparable(lastPathPart(fieldPath));
+  if (!key) return undefined;
+  return cells.find(cell => {
+    const text = normalizeComparable(cell.text);
+    return text && text.includes(key) && text.length > key.length;
+  });
+}
+
+function findHorizontalMultiPairRow(cells: TableCellRef[], fieldPath: string): TableCellRef | undefined {
+  const label = findLabelCell(cells, fieldPath);
+  if (!label) return undefined;
+  const rowCells = cells
+    .filter(cell => cell.tableIndex === label.tableIndex && cell.row === label.row)
+    .sort((a, b) => a.col - b.col);
+  const labelIndex = rowCells.findIndex(cell => cell.nodeId === label.nodeId);
+  const valueCell = labelIndex >= 0 ? rowCells[labelIndex + 1] : undefined;
+  if (!valueCell || !normalizeText(valueCell.text) || isLikelyLabelCell(valueCell)) return undefined;
+  return valueCell;
+}
+
+function findLabelCell(cells: TableCellRef[], fieldPath: string): TableCellRef | undefined {
+  const aliases = fieldAliases(fieldPath).map(normalizeComparable);
+  return cells.find(cell => {
+    const text = normalizeComparable(cell.text);
+    if (!text) return false;
+    return aliases.some(alias => text === alias || text.includes(alias) || alias.includes(text));
+  });
+}
+
+function fieldAliases(fieldPath: string): string[] {
+  const key = lastPathPart(fieldPath);
+  const canonical = normalizeComparable(key);
+  const map: Record<string, string[]> = {
+    "项目名称": ["项目名称", "项目名", "课题名称"],
+    "项目类型": ["项目类型", "项目类别", "类别"],
+    "项目负责人": ["项目负责人", "负责人", "主持人"],
+    "申报日期": ["申报日期", "申请日期", "日期"],
+  };
+  return map[canonical] || [key];
+}
+
+function isLikelyLabelCell(cell: TableCellRef): boolean {
+  const text = normalizeText(cell.text);
+  if (!text) return false;
+  const normalized = normalizeComparable(text);
+  return [...BASIC_FIELD_NAMES, ...APPLICANT_COLUMNS, ...TEACHER_COLUMNS]
+    .some(label => normalized === normalizeComparable(label));
+}
+
+function findCellAt(cells: TableCellRef[], tableIndex: number, row: number, col: number): TableCellRef | undefined {
+  return cells.find(cell => cell.tableIndex === tableIndex && cell.row === row && cell.col === col);
+}
 
 function toTemplate(
   fieldPath: string,
@@ -634,7 +609,7 @@ function toTemplate(
   return {
     fieldPath,
     value,
-    tableIndex: targetTableIndex, // 使用映射后的 target tableIndex
+    tableIndex: targetTableIndex,
     row: cell.row,
     col: cell.col,
     referenceNodeId: cell.nodeId,
@@ -646,214 +621,94 @@ function toTemplate(
 
 function flattenUserData(data: Record<string, unknown>): Array<{ path: string; value: string }> {
   const fields: Array<{ path: string; value: string }> = [];
-  for (const [key, value] of Object.entries(data)) {
-    appendValue(fields, key, value);
-  }
+  for (const [key, value] of Object.entries(data)) appendValue(fields, key, value);
   return fields.filter(field => field.value.trim());
 }
 
 function appendValue(fields: Array<{ path: string; value: string }>, path: string, value: unknown): void {
   if (value === null || value === undefined) return;
-
   if (Array.isArray(value)) {
-    if (value.length > 0 && typeof value[0] === "object" && !Array.isArray(value[0])) {
-      value.forEach((item, index) => {
-        if (typeof item === "object" && item !== null) {
-          for (const [childKey, childValue] of Object.entries(item as Record<string, unknown>)) {
-            appendValue(fields, `${path}.${index}.${childKey}`, childValue);
-          }
+    value.forEach((item, index) => {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        for (const [childKey, childValue] of Object.entries(item as Record<string, unknown>)) {
+          appendValue(fields, `${path}.${index}.${childKey}`, childValue);
         }
-      });
-    } else {
-      const flatValue = value.filter(item => item != null).map(item => String(item)).join(", ");
-      if (flatValue.trim()) {
-        fields.push({ path, value: normalizeText(flatValue) });
+      } else if (item !== null && item !== undefined) {
+        appendValue(fields, `${path}.${index}`, item);
       }
-    }
+    });
     return;
   }
-
   if (typeof value === "object") {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       appendValue(fields, `${path}.${key}`, child);
     }
     return;
   }
-
   fields.push({ path, value: normalizeText(value) });
 }
 
-function findCellByText(cells: TableCellRef[], value: string): TableCellRef | undefined {
-  const wanted = normalizeComparable(value);
-  if (!wanted) return undefined;
-
-  return cells.find(cell => normalizeComparable(cell.text) === wanted)
-    || cells.find(cell => normalizeComparable(cell.text).includes(wanted));
-}
-
-function findByLabelAndPosition(cells: TableCellRef[], fieldPath: string): TableCellRef | undefined {
-  const keyParts = fieldPath.split(".");
-  const key = keyParts[keyParts.length - 1] || fieldPath;
-  const canonicalKey = normalizeComparable(key);
-
-  const label = cells.find(cell => {
-    const text = normalizeComparable(cell.text);
-    return text && (text === canonicalKey || text.includes(canonicalKey) || canonicalKey.includes(text));
-  });
-
-  if (!label) return undefined;
-
-  const sameTable = cells.filter(cell => cell.tableIndex === label.tableIndex);
-
-  // 右侧 cell
-  const rightCells = sameTable
-    .filter(cell => cell.row === label.row && cell.col > label.col)
-    .sort((a, b) => a.col - b.col);
-
-  for (const rightCell of rightCells) {
-    if (!isLikelyLabelCell(rightCell)) {
-      return rightCell;
-    }
+function detectDuplicateTemplates(templates: ReferenceFieldTemplate[]): DuplicateTemplateGroup[] {
+  const groups = new Map<string, ReferenceFieldTemplate[]>();
+  for (const template of templates) {
+    const key = `${template.tableIndex}:${template.row}:${template.col}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(template);
   }
 
-  // 下方 cell
-  const belowCells = sameTable
-    .filter(cell => cell.col === label.col && cell.row > label.row)
-    .sort((a, b) => a.row - b.row);
-
-  for (const belowCell of belowCells) {
-    if (!isLikelyLabelCell(belowCell)) {
-      return belowCell;
-    }
-  }
-
-  return undefined;
+  return [...groups.entries()]
+    .filter(([, values]) => values.length > 1)
+    .map(([targetKey, values]) => ({
+      targetKey,
+      tableIndex: values[0].tableIndex,
+      row: values[0].row,
+      col: values[0].col,
+      fieldPaths: values.map(value => value.fieldPath),
+    }));
 }
 
-function isLikelyLabelCell(cell: TableCellRef): boolean {
-  const text = normalizeText(cell.text);
-  if (!text) return false;
-  if (text.length < 20) {
-    if (text.endsWith(":") || text.endsWith("：")) return true;
-    const normalizedText = normalizeComparable(text);
-    const commonLabels = ["项目名称", "项目类型", "项目负责人", "申报日期", "申请人", "指导教师", "姓名", "年龄", "研究方向", "职务", "手机", "邮箱", "电话", "角色", "年级", "学校", "院系", "专业"];
-    for (const label of commonLabels) {
-      if (normalizedText.includes(normalizeComparable(label))) return true;
-    }
-  }
-  return false;
-}
-
-function findSameCellKeyValue(cells: TableCellRef[], fieldPath: string, value: string): TableCellRef | undefined {
-  const keyParts = fieldPath.split(".");
-  const key = keyParts[keyParts.length - 1] || fieldPath;
-  const canonicalKey = normalizeComparable(key);
-  const targetValue = normalizeComparable(value);
-
-  return cells.find(cell => {
-    const text = normalizeText(cell.text);
-    const normalizedText = normalizeComparable(text);
-
-    const kvPattern = new RegExp(`${escapeRegex(canonicalKey)}[:：]\\s*(.+)`, "i");
-    const match = text.match(kvPattern);
-
-    if (match) {
-      const cellValue = normalizeComparable(match[1]);
-      return cellValue === targetValue || cellValue.includes(targetValue) || targetValue.includes(cellValue);
-    }
-
-    if (normalizedText.includes(canonicalKey)) {
-      const afterKey = normalizedText.substring(normalizedText.indexOf(canonicalKey) + canonicalKey.length).trim();
-      return afterKey === targetValue || afterKey.includes(targetValue) || targetValue.includes(afterKey);
-    }
-
-    return false;
-  });
-}
-
-function findHorizontalMultiPairRow(cells: TableCellRef[], fieldPath: string, value: string): TableCellRef | undefined {
-  const keyParts = fieldPath.split(".");
-  const key = keyParts[keyParts.length - 1] || fieldPath;
-  const canonicalKey = normalizeComparable(key);
-  const targetValue = normalizeComparable(value);
-
-  const rowMap = new Map<number, TableCellRef[]>();
+function buildRows(cells: TableCellRef[]): Map<number, RowInfo> {
+  const rows = new Map<number, RowInfo>();
   for (const cell of cells) {
-    const row = cell.row;
-    if (!rowMap.has(row)) rowMap.set(row, []);
-    rowMap.get(row)!.push(cell);
-  }
-
-  for (const [row, rowCells] of rowMap) {
-    rowCells.sort((a, b) => a.col - b.col);
-
-    let keyCol = -1;
-    for (let i = 0; i < rowCells.length; i++) {
-      const cellText = normalizeComparable(rowCells[i].text);
-      if (cellText === canonicalKey || cellText.includes(canonicalKey) || canonicalKey.includes(cellText)) {
-        keyCol = i;
-        break;
-      }
-    }
-
-    if (keyCol >= 0 && keyCol + 1 < rowCells.length) {
-      const valueCell = rowCells[keyCol + 1];
-      const cellValue = normalizeComparable(valueCell.text);
-      if (cellValue === targetValue || cellValue.includes(targetValue) || targetValue.includes(cellValue)) {
-        return valueCell;
-      }
+    if (typeof cell.row !== "number") continue;
+    if (!rows.has(cell.row)) rows.set(cell.row, { row: cell.row, cells: [], nonEmptyCells: [], texts: [] });
+    const row = rows.get(cell.row)!;
+    row.cells.push(cell);
+    const text = normalizeText(cell.text);
+    if (text) {
+      row.nonEmptyCells.push(cell);
+      row.texts.push(text);
     }
   }
-
-  return undefined;
+  return rows;
 }
 
-function findHeaderRow(cells: TableCellRef[], groupName: string): TableCellRef | undefined {
-  const canonicalGroupName = normalizeComparable(groupName);
-
-  return cells.find(cell => {
-    const text = normalizeComparable(cell.text);
-    return text.includes(canonicalGroupName) || canonicalGroupName.includes(text);
-  });
+function countHeaderMatches(texts: string[], expectedColumns: string[]): number {
+  const normalizedTexts = texts.map(normalizeComparable).filter(Boolean);
+  return expectedColumns.filter(expected => {
+    const wanted = normalizeComparable(expected);
+    return normalizedTexts.some(text => text === wanted || text.includes(wanted) || wanted.includes(text));
+  }).length;
 }
 
-function findByArrayTablePositionWithHeader(
-  cells: TableCellRef[],
-  headerCell: TableCellRef,
-  rowIndex: number,
-  columnName: string,
-  value: string,
-): TableCellRef | undefined {
-  const canonicalColumn = normalizeComparable(columnName);
+function averageTextLength(cells: TableCellRef[]): number {
+  return cells.reduce((sum, cell) => sum + normalizeText(cell.text).length, 0) / Math.max(cells.length, 1);
+}
 
-  // 查找列头
-  const headerRow = cells.filter(cell =>
-    cell.tableIndex === headerCell.tableIndex &&
-    cell.row === headerCell.row
-  );
-
-  const columnHeader = headerRow.find(cell => {
-    const text = normalizeComparable(cell.text);
-    return text === canonicalColumn || text.includes(canonicalColumn) || canonicalColumn.includes(text);
-  });
-
-  if (!columnHeader) return undefined;
-
-  // 查找数据行
-  const dataRow = headerCell.row + 1 + rowIndex;
-  return cells.find(cell =>
-    cell.tableIndex === headerCell.tableIndex &&
-    cell.row === dataRow &&
-    cell.col === columnHeader.col
-  );
+function lastPathPart(fieldPath: string): string {
+  const parts = fieldPath.split(".");
+  return parts[parts.length - 1] || fieldPath;
 }
 
 function normalizeComparable(value: string): string {
   return normalizeText(value)
-    .replace(/[：:：，,；;。.\s]/g, "")
+    .replace(/[\s:：,，;；。．.、/／\\\-—_()（）[\]【】]/g, "")
     .toLowerCase();
 }
 
-function escapeRegex(string: string): string {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+export const __testing = {
+  extractSectionTemplates,
+  findLikelyHeaderRow,
+  findLikelyHeaderRowInSection,
+  detectDuplicateTemplates,
+};
