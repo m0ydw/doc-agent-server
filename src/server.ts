@@ -1,5 +1,5 @@
 // 主入口文件：组装所有子系统并启动服务
-// 启动顺序：Express HTTP → Agent WebSocket → 文件清理策略 → 初始化 → 协作服务
+// 启动顺序：Express HTTP → 文件清理策略 → 初始化 → 协作服务
 // 注意：协作服务使用独立端口（COLLAB_WS_PORT），不与 HTTP 端口冲突
 
 import express from "express";
@@ -20,29 +20,11 @@ app.use("/uploads", requiresAuth, express.static(UPLOAD_DIR));
 app.use("/api/docs", docRoutes);
 app.use("/api/doc-operations", docOperationsRoutes);
 
-// AI Agent REST API 路由 — 供前端调用以获取 Agent 状态或触发重置/配置
-import { getAgentStatus, resetAgent, setAgentConfig } from "./ai/service/aiService";
-
-const aiRouter = express.Router();
-// 查询当前 Agent 工作状态
-aiRouter.get("/agent/status", getAgentStatus);
-// 重置 Agent 内部状态（清空历史、重新初始化）
-aiRouter.post("/agent/reset", resetAgent);
-// 动态设置 Agent 配置（如 LLM 模型参数）
-aiRouter.post("/agent/config", setAgentConfig);
-app.use("/api/ai", aiRouter);
-
-// 启动 HTTP 服务 — 同时承载 REST API 和 Agent WebSocket
+// 启动 HTTP 服务
 const PORT = config.PORT;
 const server = app.listen(PORT, () => {
   logger.info(`Node 后端已启动，地址：http://localhost:${PORT}`);
-  logger.info(`Agent WS：ws://localhost:${PORT}/ws/agent`);
 });
-
-// Agent WebSocket 挂载到同一个 HTTP 服务器上
-// 前端 Agent 对话通过此 WebSocket 通道与后端通信
-import { attachAgentWs } from "./ai/core/wsAgentHandler";
-attachAgentWs(server);
 
 // uploads 文件清理策略
 // 两种模式：
@@ -129,17 +111,13 @@ if (FULL_CLEANUP_ON_START) {
 }
 
 // 初始化流程
-// 文件注册表初始化必须在路由注册之后、Agent 初始化之前
-// 确保 Agent 启动时就能通过注册表查询到已有文档
+// 文件注册表初始化必须在路由注册之后
+// 确保服务启动时就能通过注册表查询到已有文档
 import { initFileRegistry } from "./services/fileRegistry";
 void initFileRegistry();
 
-// 全局 AI Agent 初始化 — 加载配置、连接 LLM、准备工具链
-import { initGlobalAgent } from "./ai/agent/globalAgent";
-initGlobalAgent();
-
 // SuperDoc Yjs 协作服务 — 使用独立端口，通过 y-websocket 协议
-// 选择独立端口的原因：避免与 HTTP/Agent WebSocket 冲突，且便于单独扩展
+// 选择独立端口的原因：避免与 HTTP 冲突，且便于单独扩展
 // 前端编辑器通过此服务与 SDK Agent 共享同一份 Yjs 文档数据
 const collaborationService = new SuperDocCollaboration({
   name: "doc-agent-collab",
