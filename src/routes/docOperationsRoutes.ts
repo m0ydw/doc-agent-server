@@ -88,4 +88,99 @@ router.get("/info/:id", async (req: Request, res: Response) => {
   }
 });
 
+// ================================================================
+// 新增 SDK 操作路由 — 文本编辑 / 格式 / 表格
+// ================================================================
+
+// 设置文本 — 在文档指定 ref 位置写入文本
+// 输入：{ docId, ref, text }
+// ref 来自 findText 返回的 positions[].ref，用于精确定位
+router.post("/set-text", async (req: Request, res: Response) => {
+  try {
+    const { docId, ref, text } = req.body;
+    if (!docId || !ref || text === undefined) {
+      return res.status(400).json({ error: "缺少 docId、ref 或 text" });
+    }
+    const result = await editor.setText(docId, ref, text);
+    res.json({ success: true, message: result });
+  } catch (error) {
+    console.error("设置文本失败:", error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// 应用格式 — 查找匹配文本并应用格式（加粗/斜体/下划线/删除线）
+// 输入：{ docId, pattern, format: { bold?, italic?, underline?, strike? } }
+// format 的每个属性值为 "on" 或 "off"
+router.post("/apply-format", async (req: Request, res: Response) => {
+  try {
+    const { docId, pattern, format } = req.body;
+    if (!docId || !pattern || !format) {
+      return res.status(400).json({ error: "缺少 docId、pattern 或 format" });
+    }
+    const result = await editor.applyFormat(docId, pattern, format);
+    res.json({ success: true, message: result });
+  } catch (error) {
+    console.error("应用格式失败:", error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// ================================================================
+// 表格操作路由 — Agent 友好的工具
+// ================================================================
+
+// 获取文档结构概览 — 返回所有表格的大致内容（前几行 preview）
+// 让 Agent 快速了解文档中有哪些表格，判断每个表格的作用
+// 入参：URL 参数 id（docId）
+// 返回：{ totalTables, tables: [{ tableIndex, rows, cols, preview }] }
+router.get("/inspect-document-structure/:id", async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const result = await editor.inspectDocumentStructure(id);
+    try {
+      const parsed = JSON.parse(result);
+      res.json({ success: true, data: parsed });
+    } catch {
+      res.json({ success: true, data: result });
+    }
+  } catch (error) {
+    console.error("获取文档结构失败:", error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// 读取表格详细内容 — 返回指定表格的完整数据（含每个单元格的文本和 ref）
+// 与旧版 readTable 的区别：返回文本内容，Agent 无需二次查询
+// 入参：URL 参数 id（docId），查询参数 tableIndex（默认 0）
+// 返回：{ tableIndex, rows, cols, cells: [{ row, col, rowspan, colspan, ref, text }] }
+router.get("/read-table-content/:id", async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const tableIndex = Number(req.query.tableIndex) || 0;
+    const result = await editor.readTableContent(id, tableIndex);
+    try {
+      const parsed = JSON.parse(result);
+      res.json({ success: true, data: parsed });
+    } catch {
+      res.json({ success: true, data: result });
+    }
+  } catch (error) {
+    console.error("读取表格内容失败:", error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+router.get("/read-table-cell-text/:id/:cellRef", async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const cellRef = String(req.params.cellRef);
+    const text = await editor.readTableCellText(id, cellRef);
+    res.json({ success: true, data: { cellRef, text } });
+  } catch (error) {
+    console.error("读取表格单元格文本失败:", error);
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 export default router;

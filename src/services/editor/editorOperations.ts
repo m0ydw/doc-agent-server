@@ -25,21 +25,21 @@ export interface MatchItem {
 export async function findText(docId: string, pattern: string): Promise<MatchItem[]> {
   console.log("查询内容" + pattern);
   try {
-    const doc = await getDocumentSession(docId);
-    const result = await doc.query.match({ select: { type: "text", pattern: pattern }, require: "any" });
+    const doc: any = await getDocumentSession(docId);
+    const result: any = await doc.query.match({ select: { type: "text", pattern: pattern }, require: "any" });
     if (!result.items || result.items.length === 0) {
       console.log("[Editor] 查询文本: " + pattern + " - 未找到匹配");
       return [];
     }
     console.log("[Editor] 查询文本: " + pattern + " - 找到 " + result.items.length + " 个匹配");
-    const mapped = [];
+    const mapped: MatchItem[] = [];
     for (let i = 0; i < result.items.length; i++) {
       const item = result.items[i];
       mapped.push({
         index: i,
         text: item.text || item.content || (item.handle ? item.handle.text : ""),
         ref: item.handle ? item.handle.ref : "",
-        evaluatedRevision: result.evaluatedRevision,
+        evaluatedRevision: Number(result.evaluatedRevision || 0),
       });
     }
     return mapped;
@@ -55,13 +55,13 @@ export async function findText(docId: string, pattern: string): Promise<MatchIte
 // 使用 by:"ref" 定位，利用 SDK 的 ref 引用机制精确替换
 export async function replaceFirst(docId: string, targetText: string, replacement: string): Promise<any> {
   try {
-    const doc = await getDocumentSession(docId);
-    const matchResult = await doc.query.match({ select: { type: "text", pattern: targetText }, require: "first" });
+    const doc: any = await getDocumentSession(docId);
+    const matchResult: any = await doc.query.match({ select: { type: "text", pattern: targetText }, require: "first" });
     if (!matchResult.items || matchResult.items.length === 0) throw new Error("未找到匹配内容");
     const refValue = matchResult.items[0].handle ? matchResult.items[0].handle.ref : null;
     if (!refValue) throw new Error("无法获取替换位置");
-    const stepsArray = [{ id: "replace-1", op: "text.rewrite", where: { by: "ref", ref: refValue }, args: { replacement: { text: replacement } }}];
-    const applyParams = {
+    const stepsArray: any[] = [{ id: "replace-1", op: "text.rewrite", where: { by: "ref", ref: refValue }, args: { replacement: { text: replacement } }}];
+    const applyParams: any = {
       atomic: true,
       steps: stepsArray,
     };
@@ -80,11 +80,11 @@ export async function replaceFirst(docId: string, targetText: string, replacemen
 // atomic: true 表示所有替换作为一个原子操作执行（要么全部成功，要么全部失败）
 export async function replaceAll(docId: string, targetText: string, replacement: string): Promise<any> {
   try {
-    const doc = await getDocumentSession(docId);
-    const matchResult = await doc.query.match({ select: { type: "text", pattern: targetText }, require: "any" });
+    const doc: any = await getDocumentSession(docId);
+    const matchResult: any = await doc.query.match({ select: { type: "text", pattern: targetText }, require: "any" });
     if (!matchResult.items || matchResult.items.length === 0) return { success: true, replaced: 0 };
     const items = matchResult.items;
-    const stepsArray = [];
+    const stepsArray: any[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const ref = item.handle ? item.handle.ref : null;

@@ -3,19 +3,24 @@
 // 为什么需要并发保护：多个请求可能同时触发客户端创建，需防止重复创建
 
 import path from "path";
+import type {
+  DocOpenParams,
+  SuperDocClient,
+  SuperDocDocument,
+} from "@superdoc-dev/sdk";
 
 // uploads 目录的绝对路径，所有文档文件存放在此
 const DOCS_DIR = path.join(__dirname, "../../uploads");
 
 // SDK 客户端状态变量
-let client: unknown = null;          // 客户端实例（单例）
-let isConnected = false;             // 连接状态标记
-let connectPromise: Promise<unknown> | null = null;  // 并发保护：正在进行中的连接 Promise
+let client: SuperDocClient | null = null; // 客户端实例（单例）
+let isConnected = false; // 连接状态标记
+let connectPromise: Promise<SuperDocClient> | null = null; // 并发保护：正在进行中的连接 Promise
 
 // getClient — 获取或创建 SDK 客户端单例
 // 使用 Promise 锁机制防止并发调用导致重复创建
 // 返回已连接的 SDK 客户端实例
-async function getClient(): Promise<unknown> {
+async function getClient(): Promise<SuperDocClient> {
   // 如果已有已连接的客户端，直接复用
   if (client && isConnected) {
     return client;
@@ -29,10 +34,7 @@ async function getClient(): Promise<unknown> {
   // 创建新的连接 Promise
   connectPromise = (async () => {
     // 动态导入 SDK，避免启动时因 SDK 缺失导致整个服务崩溃
-    const superdoc = await import("@superdoc-dev/sdk");
-    const createSuperDocClient = (
-      superdoc as { createSuperDocClient: (opts: Record<string, unknown>) => unknown }
-    ).createSuperDocClient;
+    const { createSuperDocClient } = await import("@superdoc-dev/sdk");
 
     // 创建客户端并配置超时参数
     // requestTimeoutMs=90000（90秒）：AI Agent 操作（如查找/替换）可能需要较长时间
@@ -47,7 +49,7 @@ async function getClient(): Promise<unknown> {
       watchdogTimeoutMs: 90000,
     });
 
-    await (client as { connect: () => Promise<void> }).connect();
+    await client.connect();
     isConnected = true;
     console.log("[SDK] Client connected (timeout=90s)");
     return client;
@@ -55,10 +57,10 @@ async function getClient(): Promise<unknown> {
 
   try {
     const result = await connectPromise;
-    connectPromise = null;  // 连接完成后清空锁
+    connectPromise = null; // 连接完成后清空锁
     return result;
   } catch (error) {
-    connectPromise = null;  // 连接失败也要清空锁，允许下次重试
+    connectPromise = null; // 连接失败也要清空锁，允许下次重试
     throw error;
   }
 }
@@ -67,7 +69,7 @@ async function getClient(): Promise<unknown> {
 // 通常在 cleanup 流程中调用，或连接超时后重置
 async function disposeClient(): Promise<void> {
   if (client) {
-    await (client as { dispose: () => Promise<void> }).dispose();
+    await client.dispose();
     client = null;
     isConnected = false;
     console.log("[SDK] Client disposed");
@@ -76,33 +78,12 @@ async function disposeClient(): Promise<void> {
 
 // 打开文档时的参数接口 — 支持独立模式和协作模式
 export interface OpenParams {
-  docPath: string;           // 文档文件在磁盘上的路径
-  sessionId?: string;        // 会话 ID，用于标识本次编辑会话
-  collabUrl?: string;        // 协作 WebSocket 服务地址（如 ws://localhost:1234）
-  collabDocumentId?: string; // 协作房间名/文档 ID，对应 y-websocket room
-  onMissing?: string;        // 文档不存在时的处理策略
-  bootstrapSettlingMs?: number; // 引导数据稳定等待时间
-}
-
-// 文档句柄接口 — 定义了 SDK 文档对象上可用的方法
-export interface Document {
-  close: () => Promise<void>;
-  save: (options: any) => Promise<void>;
-  getText: () => Promise<string>;
-  info: () => Promise<any>;
-  query: {
-    match: (params: any) => Promise<any>;  // 文本/节点匹配查询
-  };
-  mutations: {
-    apply: (params: any) => Promise<any>;  // 执行编辑变更
-  };
-  tables: {
-    get: (params: any) => Promise<any>;    // 获取表格维度信息
-    getCells: (params: any) => Promise<any>; // 获取表格单元格列表
-  };
-  blocks: {
-    list: (params: any) => Promise<any>;   // 获取文档块列表
-  };
+  docPath: string; // 文档文件在磁盘上的路径
+  sessionId?: DocOpenParams["sessionId"]; // 会话 ID，用于标识本次编辑会话
+  collabUrl?: DocOpenParams["collabUrl"]; // 协作 WebSocket 服务地址（如 ws://localhost:1234）
+  collabDocumentId?: DocOpenParams["collabDocumentId"]; // 协作房间名/文档 ID，对应 y-websocket room
+  onMissing?: DocOpenParams["onMissing"]; // 文档不存在时的处理策略
+  bootstrapSettlingMs?: DocOpenParams["bootstrapSettlingMs"]; // 引导数据稳定等待时间
 }
 
 // openDocument — 打开一个文档并返回文档句柄
@@ -110,12 +91,19 @@ export interface Document {
 //   1. 独立模式：只传 docPath 和 sessionId
 //   2. 协作模式：额外传 collabUrl + collabDocumentId，Agent 通过 y-websocket 加入协作房间
 // 协作模式下 Agent 与前端编辑器共享同一份 Yjs 数据，编辑可实时同步
-async function openDocument(params: OpenParams): Promise<Document> {
-  const { docPath, sessionId, collabUrl, collabDocumentId, onMissing, bootstrapSettlingMs } = params;
+async function openDocument(params: OpenParams): Promise<SuperDocDocument> {
+  const {
+    docPath,
+    sessionId,
+    collabUrl,
+    collabDocumentId,
+    onMissing,
+    bootstrapSettlingMs,
+  } = params;
   const sdkClient = await getClient();
 
   // 构造打开文档的 payload
-  const openPayload: any = { doc: docPath };
+  const openPayload: DocOpenParams = { doc: docPath };
 
   if (sessionId) {
     openPayload.sessionId = sessionId;
@@ -128,25 +116,30 @@ async function openDocument(params: OpenParams): Promise<Document> {
     openPayload.collabUrl = collabUrl;
     if (collabDocumentId) openPayload.collabDocumentId = collabDocumentId;
     if (onMissing) openPayload.onMissing = onMissing;
-    if (bootstrapSettlingMs) openPayload.bootstrapSettlingMs = bootstrapSettlingMs;
+    if (bootstrapSettlingMs)
+      openPayload.bootstrapSettlingMs = bootstrapSettlingMs;
   }
 
-  const doc = await (sdkClient as { open: (payload: Record<string, unknown>) => Promise<Document> }).open(openPayload);
-  console.log(`[SDK] Document opened: ${docPath} room=${collabDocumentId ?? 'none'}`);
+  const doc = await sdkClient.open(openPayload);
+  console.log(
+    `[SDK] Document opened: ${docPath} room=${collabDocumentId ?? "none"}`,
+  );
   return doc;
 }
 
+export type RoomDocument = Awaited<ReturnType<typeof openDocument>>;
+
+export type RoomSessionResult = {
+  sessionId: string;
+  doc: RoomDocument;
+};
+
 // closeDocument — 关闭文档句柄，释放 SDK 资源
-async function closeDocument(doc: Document | null): Promise<void> {
+async function closeDocument(doc: RoomDocument | null): Promise<void> {
   if (doc) {
     await doc.close();
     console.log("[SDK] Document closed");
   }
 }
 
-export {
-  disposeClient,
-  openDocument,
-  closeDocument,
-  DOCS_DIR,
-};
+export { disposeClient, openDocument, closeDocument, DOCS_DIR };
