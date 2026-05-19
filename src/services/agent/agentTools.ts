@@ -10,6 +10,12 @@ import type {
   AgentRun,
   ApprovalItem,
 } from "./agentTypes";
+import {
+  logToolCall,
+  logToolInput,
+  logToolOutput,
+  logToolError,
+} from "./agentLogger";
 
 type EmitAgentEvent = (
   type: AgentEvent["type"],
@@ -82,9 +88,21 @@ async function withToolEvents<T extends ToolResult>(
   input: unknown,
   run: () => Promise<T>,
 ): Promise<T> {
+  // ========== 调试日志：工具调用开始 ==========
+  logToolCall(name);
+  logToolInput(input);
+
   emit("tool.started", { name, input });
   try {
     const result = await run();
+
+    // ========== 调试日志：工具返回值 ==========
+    logToolOutput({
+      status: result.status,
+      summary: result.summary,
+      detail: result.detail,
+    });
+
     emit("tool.finished", {
       name,
       status: result.status,
@@ -93,6 +111,9 @@ async function withToolEvents<T extends ToolResult>(
     });
     return result;
   } catch (error) {
+    // ========== 调试日志：工具错误 ==========
+    logToolError(name, error);
+
     const result = {
       status: "error" as const,
       summary: error instanceof Error ? error.message : "工具调用失败",

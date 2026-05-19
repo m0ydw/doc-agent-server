@@ -28,6 +28,20 @@ import {
 } from "./agentSessionManager";
 import { createAgentTools } from "./agentTools";
 import type { AgentEvent, AgentRun } from "./agentTypes";
+import {
+  logAgentStart,
+  logUserInput,
+  logSystemPrompt,
+  logDocumentContext,
+  logToolList,
+  logStreamChunk,
+  logStreamEnd,
+  logStep,
+  logAgentFinish,
+  logAgentError,
+  logFinalOutput,
+  logToolCallDecision,
+} from "./agentLogger";
 
 /**
  * 事件发送函数类型
@@ -194,6 +208,10 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
   }
 
   try {
+    // ========== 调试日志：Agent 开始 ==========
+    logAgentStart(runId);
+    logUserInput(run.prompt);
+
     // 发送初始 trace 事件，告知前端 Agent 开始执行
     emit(
       runId,
@@ -204,7 +222,7 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
 
     // 创建 LLM 模型实例
     const model = createDeepSeekModel(run);
-    
+
     // 创建工具集合
     // createAgentTools 返回一个对象，每个属性是一个工具定义
     // 工具定义包含：description（描述）、inputSchema（参数 schema）、execute（执行函数）
@@ -212,27 +230,50 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
       emit(runId, type, payload, send);
     });
 
+    // ========== 调试日志：打印工具列表 ==========
+    logToolList(tools as unknown as Record<string, unknown>);
+
+    // 构建完整的系统提示词
+    const fullSystemPrompt = `${SYSTEM_PROMPT}\n\n${buildDocumentContext(run)}`;
+
+    // ========== 调试日志：打印 System Prompt 和文档上下文 ==========
+    logSystemPrompt(SYSTEM_PROMPT);
+    logDocumentContext(buildDocumentContext(run));
+
+    // 用于收集每步的流式文本（在工具调用前输出的 LLM 思考文本）
+    let stepTextBuffer = "";
+
     // 调用 streamText 启动流式对话
     // 这是整个 Agent 的核心：LLM + 工具 + 流式输出
     const result = streamText({
       model,                    // LLM 模型
-      system: `${SYSTEM_PROMPT}\n\n${buildDocumentContext(run)}`,  // 系统提示词 + 文档上下文
+      system: fullSystemPrompt, // 系统提示词 + 文档上下文
       prompt: run.prompt,       // 用户输入的任务描述
       tools,                    // 工具集合（LLM 可以调用这些工具）
-      
+
       // stopWhen: 定义停止条件
       // stepCountIs(8) 表示最多执行 8 个"步骤"
       // 每个步骤 = LLM 生成一次响应（可能包含多个工具调用）
       // 这是防止 Agent 无限循环的安全机制
       stopWhen: stepCountIs(8),
-      
+
       // temperature: 控制生成的随机性
       // 0.2 表示较低的随机性，适合需要精确操作的任务
       temperature: 0.2,
-      
+
       // experimental_onStepStart: 每步开始时的回调
       // stepNumber 从 0 开始，这里 +1 是为了显示更友好的序号
       experimental_onStepStart: ({ stepNumber }) => {
+        // ========== 调试日志：LLM 工具调用决策 ==========
+        // 如果上一步有文本输出，说明是 LLM 调用工具前的思考/决策
+        if (stepTextBuffer.trim()) {
+          logToolCallDecision(stepTextBuffer);
+        }
+
+        // ========== 调试日志：步骤开始 ==========
+        logStep(stepNumber);
+        stepTextBuffer = ""; // 重置文本缓冲区
+
         emit(
           runId,
           "agent.trace",
@@ -240,11 +281,16 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
           send,
         );
       },
-      
+
       // onFinish: 流式生成完成时的回调
       // finishReason: 完成原因（"stop"=正常结束, "tool-calls"=工具调用中, "length"=达到长度限制）
       // usage: token 使用量统计
-      onFinish: ({ finishReason, usage }) => {
+      onFinish: ({ finishReason, usage, text }) => {
+        // ========== 调试日志：完成 ==========
+        logStreamEnd();
+        logAgentFinish(finishReason, usage);
+        logFinalOutput(text);
+
         // 检查是否处于等待审批状态
         const latestRun = getRun(runId);
         if (latestRun?.status === "waiting_approval") {
@@ -275,7 +321,11 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
       // 检查任务是否被取消
       const latestRun = getRun(runId);
       if (latestRun?.status === "cancelled") break;
-      
+
+      // ========== 调试日志：实时打印流式文本 ==========
+      logStreamChunk(delta);
+      stepTextBuffer += delta;
+
       // 发送文本片段给前端
       emit(runId, "agent.message.delta", { text: delta }, send);
     }
@@ -285,6 +335,9 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
     // 如果不调用，可能会导致内存泄漏或连接未正确关闭
     await result.consumeStream();
   } catch (error) {
+    // ========== 调试日志：Agent 错误 ==========
+    logAgentError(error);
+
     // 错误处理：更新状态并发送错误事件
     setRunStatus(runId, "error");
     emit(
