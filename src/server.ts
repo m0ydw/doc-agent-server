@@ -11,6 +11,20 @@ import docRoutes from "./routes/docRoutes";
 import docOperationsRoutes from "./routes/docOperationsRoutes";
 import { UPLOAD_DIR } from "./services/docServices";
 import { requiresAuth } from "./middleware/auth";
+/**
+ * 【新增】导入 Agent WebSocket 模块
+ * 
+ * Agent WebSocket 是 AI Agent 与前端通信的核心通道：
+ * - 前端通过 WebSocket 发送任务指令（如 agent.start）
+ * - 后端通过 WebSocket 实时推送 Agent 执行进度（如 tool.finished、agent.trace）
+ * - 支持人机协作：当 Agent 需要审批时，前端可以发送 agent.approval.resolve
+ * 
+ * 【为什么用 WebSocket 而不是 HTTP】
+ * - Agent 执行是长时间运行的任务（可能几分钟），HTTP 请求会超时
+ * - 需要实时推送进度，WebSocket 比轮询更高效
+ * - 支持双向通信，前端可以随时取消或审批
+ */
+import { attachAgentWebSocket } from "./services/agent/agentWs";
 
 // 将 uploads 目录通过 HTTP 静态服务暴露给前端
 // 使用轻量认证中间件防止外部直接访问敏感文件
@@ -25,6 +39,38 @@ const PORT = config.PORT;
 const server = app.listen(PORT, () => {
   logger.info(`Node 后端已启动，地址：http://localhost:${PORT}`);
 });
+
+/**
+ * 【新增】启动 Agent WebSocket 服务
+ * 
+ * 将 WebSocket 服务器挂载到 HTTP 服务器上，路径为 /ws/agent
+ * 这样前端可以通过 ws://localhost:3000/ws/agent 连接到 Agent
+ * 
+ * 【WebSocket 与 HTTP 共享端口的优势】
+ * - 不需要额外的端口，简化部署
+ * - 可以复用 HTTP 的认证中间件
+ * - 前端只需要知道一个地址
+ * 
+ * 【通信协议】
+ * 所有消息都是 JSON 格式，包含 type 字段标识消息类型：
+ * 
+ * 前端 → 后端：
+ * - agent.start: 启动 Agent 任务
+ * - agent.cancel: 取消正在运行的任务
+ * - agent.approval.resolve: 处理审批请求
+ * - agent.replay: 重新播放事件（用于页面刷新后恢复状态）
+ * 
+ * 后端 → 前端：
+ * - agent.started: Agent 已启动
+ * - agent.trace: 思考过程
+ * - tool.started/tool.finished: 工具调用
+ * - agent.message.delta: 流式文本片段
+ * - approval.requested: 需要审批
+ * - approval.resolved: 审批已处理
+ * - agent.finished/agent.error: 任务结束
+ */
+attachAgentWebSocket(server);
+logger.info(`Agent WebSocket 已启动：ws://localhost:${PORT}/ws/agent`);
 
 // uploads 文件清理策略
 // 两种模式：
