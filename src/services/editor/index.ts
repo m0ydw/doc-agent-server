@@ -8,6 +8,7 @@ import * as formatOperations from "./formatOperations";
 export const findText = editorOperations.findText;
 export const replaceFirst = editorOperations.replaceFirst;
 export const replaceAll = editorOperations.replaceAll;
+export const replaceByRefs = editorOperations.replaceByRefs;
 export const getText = editorOperations.getTextContent;
 export const getInfo = editorOperations.getDocumentInfo;
 export const setText = formatOperations.setText;
@@ -49,6 +50,7 @@ export default {
   findText,
   replaceFirst,
   replaceAll,
+  replaceByRefs,
   getText,
   getInfo,
   setText,

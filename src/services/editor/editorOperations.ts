@@ -19,6 +19,13 @@ export interface MatchItem {
   evaluatedRevision: number;      // 匹配时的文档修订版本号
 }
 
+export interface RefReplacement {
+  ref: string;
+  text: string;
+  oldText?: string;
+  reason?: string;
+}
+
 // findText — 在文档中搜索指定文本的所有匹配
 // 调用 SDK doc.query.match 进行全文搜索，require:"any" 返回全部匹配
 // 返回 MatchItem 数组，包含每个匹配的文本、ref（SDK 引用）、修订版本号
@@ -100,6 +107,44 @@ export async function replaceAll(docId: string, targetText: string, replacement:
     console.error("[Editor] 替换失败:", msg);
     return { success: false, message: msg };
   }
+}
+
+export async function replaceByRefs(
+  docId: string,
+  replacements: RefReplacement[],
+): Promise<Array<RefReplacement & { success: boolean; error?: string }>> {
+  if (!replacements.length) return [];
+
+  const doc: any = await getDocumentSession(docId);
+  const results: Array<RefReplacement & { success: boolean; error?: string }> = [];
+
+  for (const replacement of replacements) {
+    try {
+      await doc.mutations.apply({
+        atomic: true,
+        steps: [
+          {
+            id: `replace-ref-${results.length}`,
+            op: "text.rewrite",
+            where: { by: "ref", ref: replacement.ref },
+            args: {
+              replacement: { text: replacement.text },
+              style: { inline: { mode: "preserve" } },
+            },
+          },
+        ],
+      });
+      results.push({ ...replacement, success: true });
+    } catch (error) {
+      results.push({
+        ...replacement,
+        success: false,
+        error: error instanceof Error ? error.message : "未知错误",
+      });
+    }
+  }
+
+  return results;
 }
 
 // getTextContent — 获取文档的完整纯文本内容

@@ -3,6 +3,7 @@ import { z } from "zod";
 import * as editor from "../editor";
 import {
   addPendingApproval,
+  waitForApprovalResult,
 } from "./agentSessionManager";
 import type {
   AgentCellWrite,
@@ -39,6 +40,17 @@ const cellWriteSchema = z.object({
   tableIndex: z.number().optional(),
   row: z.number().optional(),
   col: z.number().optional(),
+});
+
+const replaceTextSchema = z.object({
+  documentName: z
+    .string()
+    .optional()
+    .describe("目标文档名称；不填则使用当前文档"),
+  targetText: z.string().min(1).describe("要查找并替换的原文本"),
+  replacement: z.string().describe("替换后的新文本"),
+  replaceAll: z.boolean().default(true).describe("true 替换全部匹配；false 只替换第一处"),
+  reason: z.string().optional().describe("为什么要做这次替换"),
 });
 
 function parseJsonResult(value: string): unknown {
@@ -147,6 +159,100 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             detail: { text },
           };
         }),
+    }),
+
+    find_text: tool({
+      description:
+        "在某个 DOCX 文档中查找文本。documentName 不填时查找当前文档。",
+      inputSchema: z.object({
+        documentName: z.string().optional(),
+        pattern: z.string().min(1).describe("要查找的文本"),
+      }),
+      execute: async ({ documentName, pattern }) =>
+        withToolEvents(emit, "find_text", { documentName, pattern }, async () => {
+          const doc = requireDocument(run, documentName);
+          const matches = await editor.findText(doc.id, pattern);
+          return {
+            status: "ok",
+            summary: `在《${doc.name}》中找到 ${matches.length} 处“${pattern}”。`,
+            detail: { documentName: doc.name, pattern, count: matches.length, matches },
+          };
+        }),
+    }),
+
+    replace_text: tool({
+      description:
+        "查找并替换 DOCX 文本。会根据权限模式阻塞、发起审批或直接替换。替换前会先查找匹配项。",
+      inputSchema: replaceTextSchema,
+      execute: async ({ documentName, targetText, replacement, replaceAll, reason }, options) =>
+        withToolEvents(
+          emit,
+          "replace_text",
+          { documentName, targetText, replacement, replaceAll, permissionMode: run.permissionMode },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            if (run.permissionMode === "read_only") {
+              return {
+                status: "blocked",
+                summary: "当前权限是 read_only，替换已被阻止。",
+                detail: { targetText, replacement },
+              };
+            }
+
+            const allMatches = await editor.findText(doc.id, targetText);
+            const matches = replaceAll ? allMatches : allMatches.slice(0, 1);
+            if (!matches.length) {
+              return {
+                status: "ok",
+                summary: `未在《${doc.name}》中找到“${targetText}”，没有修改文档。`,
+                detail: { documentName: doc.name, targetText, replacement, count: 0, matches: [] },
+              };
+            }
+
+            if (run.permissionMode === "review_required") {
+              const items: ApprovalItem[] = matches.map((match, index) => ({
+                operation: "text_replace",
+                documentName: doc.name,
+                itemId: `${options.toolCallId}-${index}`,
+                ref: match.ref,
+                text: replacement,
+                oldText: match.text || targetText,
+                newText: replacement,
+                reason,
+              }));
+              const approval = addPendingApproval(
+                run.runId,
+                items,
+                options.toolCallId,
+              );
+              emit("approval.requested", {
+                approvalId: approval.approvalId,
+                items: approval.items,
+              });
+              const resolution = await waitForApprovalResult(approval.approvalId);
+              return {
+                status: "ok",
+                summary: `替换审批已处理：批准 ${resolution.approvedCount} 项，拒绝 ${resolution.rejectedCount} 项。`,
+                detail: resolution,
+              };
+            }
+
+            const replaceResult = await editor.replaceByRefs(
+              doc.id,
+              matches.map((match) => ({
+                ref: match.ref,
+                oldText: match.text || targetText,
+                text: replacement,
+                reason,
+              })),
+            );
+            return {
+              status: "ok",
+              summary: `已在《${doc.name}》替换 ${replaceResult.filter((item) => item.success).length} 处“${targetText}”。`,
+              detail: { documentName: doc.name, targetText, replacement, replaceResult },
+            };
+          },
+        ),
     }),
 
     inspect_document_tables: tool({
@@ -273,6 +379,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               const items: ApprovalItem[] = await Promise.all(
                 cells.map(async (cell: AgentCellWrite, index: number) => ({
                   ...cell,
+                  operation: "cell_write" as const,
                   documentName: cell.documentName ?? doc.name,
                   itemId: `${options.toolCallId}-${index}`,
                   oldText: await editor.readTableCellText(
@@ -291,10 +398,11 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 approvalId: approval.approvalId,
                 items: approval.items,
               });
+              const resolution = await waitForApprovalResult(approval.approvalId);
               return {
-                status: "pending_approval",
-                summary: `已生成 ${items.length} 个待审阅写入项，等待用户批准或拒绝。`,
-                detail: approval,
+                status: "ok",
+                summary: `写入审批已处理：批准 ${resolution.approvedCount} 项，拒绝 ${resolution.rejectedCount} 项。`,
+                detail: resolution,
               };
             }
 

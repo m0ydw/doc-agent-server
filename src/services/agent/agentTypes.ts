@@ -44,6 +44,7 @@ export type AgentEvent = {
 };
 
 export type AgentCellWrite = {
+  operation?: "cell_write" | "text_replace";
   documentName?: string;
   ref: string;
   text: string;
@@ -64,6 +65,17 @@ export type PendingApproval = {
   toolCallId?: string;
   items: ApprovalItem[];
   createdAt: number;
+};
+
+export type ApprovalResolution = {
+  approvalId: string;
+  approvedCount: number;
+  rejectedCount: number;
+  approved: ApprovalItem[];
+  rejected: ApprovalItem[];
+  writeResult: unknown[];
+  verifyResult: unknown[];
+  replaceResult: unknown[];
 };
 
 export type AgentRunStatus =

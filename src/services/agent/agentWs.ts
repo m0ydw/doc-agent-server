@@ -6,11 +6,11 @@ import {
   cancelRun,
   createRun,
   getRun,
+  resolveApprovalResult,
   resolvePendingApproval,
-  setRunStatus,
 } from "./agentSessionManager";
 import { runAgent } from "./agentRunner";
-import type { AgentEvent, AgentStartPayload } from "./agentTypes";
+import type { AgentEvent, AgentStartPayload, ApprovalResolution } from "./agentTypes";
 
 type ClientMessage =
   | { type: "agent.start"; payload: AgentStartPayload }
@@ -95,6 +95,7 @@ async function handleApprovalResolve(
 
   const writeResult = [];
   const verifyResult = [];
+  const replaceResult = [];
 
   for (const item of approved) {
     const targetDoc =
@@ -103,16 +104,29 @@ async function handleApprovalResolve(
       run.documents[0];
     if (!targetDoc) continue;
 
-    const cell = {
-      ref: item.ref,
-      text: item.newText,
-      reason: item.reason,
-    };
-    writeResult.push(...(await editor.writeCellsText(targetDoc.id, [cell])));
-    verifyResult.push(...(await editor.verifyCells(targetDoc.id, [cell])));
+    if (item.operation === "text_replace") {
+      replaceResult.push(
+        ...(await editor.replaceByRefs(targetDoc.id, [
+          {
+            ref: item.ref,
+            oldText: item.oldText,
+            text: item.newText,
+            reason: item.reason,
+          },
+        ])),
+      );
+    } else {
+      const cell = {
+        ref: item.ref,
+        text: item.newText,
+        reason: item.reason,
+      };
+      writeResult.push(...(await editor.writeCellsText(targetDoc.id, [cell])));
+      verifyResult.push(...(await editor.verifyCells(targetDoc.id, [cell])));
+    }
   }
 
-  const event = addEvent(message.runId, "approval.resolved", {
+  const resolution: ApprovalResolution = {
     approvalId: approval.approvalId,
     approvedCount: approved.length,
     rejectedCount: rejected.length,
@@ -120,16 +134,11 @@ async function handleApprovalResolve(
     rejected,
     writeResult,
     verifyResult,
-  });
+    replaceResult,
+  };
+  const event = addEvent(message.runId, "approval.resolved", resolution);
   send(ws, event);
-
-  setRunStatus(message.runId, "finished");
-  send(
-    ws,
-    addEvent(message.runId, "agent.finished", {
-      summary: `审批已处理：批准 ${approved.length} 项，拒绝 ${rejected.length} 项。`,
-    }),
-  );
+  resolveApprovalResult(approval.approvalId, resolution);
 }
 
 export function attachAgentWebSocket(server: Server): WebSocketServer {

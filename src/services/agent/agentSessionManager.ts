@@ -6,10 +6,15 @@ import type {
   AgentRunStatus,
   AgentStartPayload,
   ApprovalItem,
+  ApprovalResolution,
   PendingApproval,
 } from "./agentTypes";
 
 const runs = new Map<string, AgentRun>();
+const approvalResolvers = new Map<
+  string,
+  (resolution: ApprovalResolution) => void
+>();
 
 export function createRun(payload: AgentStartPayload): AgentRun {
   const runId = randomUUID();
@@ -88,9 +93,27 @@ export function addPendingApproval(
     createdAt: Date.now(),
   };
   run.pendingApprovals.push(approval);
+  approvalResolvers.set(approval.approvalId, () => {});
   run.status = "waiting_approval";
   run.updatedAt = Date.now();
   return approval;
+}
+
+export function waitForApprovalResult(
+  approvalId: string,
+): Promise<ApprovalResolution> {
+  return new Promise((resolve) => {
+    approvalResolvers.set(approvalId, resolve);
+  });
+}
+
+export function resolveApprovalResult(
+  approvalId: string,
+  resolution: ApprovalResolution,
+): void {
+  const resolver = approvalResolvers.get(approvalId);
+  approvalResolvers.delete(approvalId);
+  resolver?.(resolution);
 }
 
 export function resolvePendingApproval(
