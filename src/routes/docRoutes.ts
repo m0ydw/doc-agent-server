@@ -5,7 +5,6 @@
 import express, { Request, Response, Router } from "express";
 import multer, { FileFilterCallback } from "multer";
 import path from "path";
-import fs from "fs/promises";
 import config from "../config";
 import {
   saveDocument,
@@ -14,6 +13,7 @@ import {
   getDocumentById,
   deleteDocument,
   cleanupDocuments,
+  saveDocumentContent,
   DocumentMetadata,
 } from "../services/docServices";
 import * as sessionManager from "../services/session";
@@ -21,6 +21,13 @@ import { registerDocument, unregisterDocument } from "../services/fileRegistry";
 
 const router: Router = express.Router();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
+const rawDocxBody = express.raw({
+  type: [
+    "application/octet-stream",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ],
+  limit: "50mb",
+});
 
 // 文件名解码 — 处理前端通过特殊编码方式发送的文件名（如 UTF-8 二进制编码）
 // 两层解码逻辑：先尝试 decodeURIComponent，失败则使用 Buffer 从 binary 转 utf8
@@ -78,6 +85,26 @@ router.post("/cleanup", async (req: Request, res: Response) => {
   } catch (error) {
     console.error("清理文件失败:", error);
     res.status(500).json({ error: "清理文件失败" });
+  }
+});
+
+router.post("/:id/save", rawDocxBody, async (req: Request, res: Response) => {
+  try {
+    const id = getParamId(req);
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      return res.status(400).json({ success: false, error: "缺少文档内容" });
+    }
+
+    const result = await saveDocumentContent(id, req.body);
+    res.json({
+      success: true,
+      saved: result.saved,
+      hash: result.hash,
+      document: withCollaboration(result.metadata),
+    });
+  } catch (error) {
+    console.error("保存文档失败:", error);
+    res.status(500).json({ success: false, error: "保存文档失败" });
   }
 });
 
@@ -215,8 +242,8 @@ router.post("/:id/open", async (req: Request, res: Response) => {
 });
 
 // 获取种子文件 — 返回原始 DOCX 文件供前端播种到 Yjs 房间
-// sendFile 完成后自动删除磁盘文件，原因是 Yjs 协作模式已持有完整文档内容
-// 磁盘文件仅作为"种子数据源"，一次性使用后即可回收
+// 注意：不要在发送后删除磁盘文件。页面刷新、浏览器重开或协作服务重启后，
+// 前端仍需要这个 DOCX 作为重新进入协作房间的种子数据。
 router.get("/:id/seed", async (req: Request, res: Response) => {
   try {
     const id = getParamId(req);
@@ -238,10 +265,7 @@ router.get("/:id/seed", async (req: Request, res: Response) => {
       `attachment; filename="${encodeURIComponent(metadata.originalName)}"`
     );
 
-    // 发送文件后删除，释放磁盘空间（Yjs 模式持有数据，无需保留源文件）
-    res.sendFile(filePath, () => {
-      fs.unlink(filePath).catch(() => {});
-    });
+    res.sendFile(filePath);
   } catch (error) {
     console.error("获取种子文件失败:", error);
     res.status(500).json({ error: "获取种子文件失败" });

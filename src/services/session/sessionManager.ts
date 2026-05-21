@@ -7,7 +7,7 @@ import {
   type RoomSessionResult,
 } from "../cliRunner";
 import config from "../../config";
-import { getDocumentById } from "../docServices";
+import { getDocumentById, refreshSavedStateFromDisk } from "../docServices";
 
 type SessionEntry = {
   sessionId: string;
@@ -132,6 +132,43 @@ export async function ensureYjsRoom(
     roomName: resolveRoomName(docId, metadata),
     wsUrl: COLLAB_WS_URL,
   };
+}
+
+export async function saveSessionDocument(
+  docId: string,
+): Promise<{ saved: boolean; hash: string; docId: string }> {
+  const session = sessions.get(docId);
+  if (!session) {
+    const result = await refreshSavedStateFromDisk(docId);
+    return { saved: result.saved, hash: result.hash, docId };
+  }
+
+  await session.doc.save({ inPlace: true });
+  const result = await refreshSavedStateFromDisk(docId);
+  session.lastActivity = Date.now();
+  return { saved: result.saved, hash: result.hash, docId };
+}
+
+export async function saveSessionDocuments(
+  docIds: string[],
+): Promise<Array<{ saved: boolean; hash: string; docId: string; error?: string }>> {
+  const uniqueIds = Array.from(new Set(docIds));
+  const results = [];
+
+  for (const docId of uniqueIds) {
+    try {
+      results.push(await saveSessionDocument(docId));
+    } catch (error) {
+      results.push({
+        docId,
+        saved: false,
+        hash: "",
+        error: error instanceof Error ? error.message : "保存失败",
+      });
+    }
+  }
+
+  return results;
 }
 
 export async function closeSessionByDocId(docId: string): Promise<void> {

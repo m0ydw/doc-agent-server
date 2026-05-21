@@ -26,6 +26,7 @@ import {
   getRun,
   setRunStatus,
 } from "./agentSessionManager";
+import { saveSessionDocuments } from "../session";
 import { createAgentTools } from "./agentTools";
 import type { AgentEvent, AgentRun } from "./agentTypes";
 import {
@@ -50,6 +51,16 @@ import {
  * @param event - Agent 事件对象，包含类型、载荷、时间戳等
  */
 type EmitToClient = (event: AgentEvent) => void;
+
+function runHasWriteOperations(events: AgentEvent[]): boolean {
+  return events.some(
+    (event) =>
+      event.type === "tool.finished" &&
+      (event.payload.name === "write_cells_text" ||
+        event.payload.name === "replace_text") &&
+      event.payload.status === "ok",
+  );
+}
 
 /**
  * Agent 系统提示词
@@ -287,7 +298,7 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
       // onFinish: 流式生成完成时的回调
       // finishReason: 完成原因（"stop"=正常结束, "tool-calls"=工具调用中, "length"=达到长度限制）
       // usage: token 使用量统计
-      onFinish: ({ finishReason, usage, text }) => {
+      onFinish: async ({ finishReason, usage, text }) => {
         // ========== 调试日志：完成 ==========
         logStreamEnd();
         logAgentFinish(finishReason, usage);
@@ -303,6 +314,21 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
             send,
           );
           return;
+        }
+
+        if (latestRun && runHasWriteOperations(latestRun.events)) {
+          const saveResults = await saveSessionDocuments(
+            latestRun.documents.map((doc) => doc.id),
+          );
+          const changedCount = saveResults.filter((item) => item.saved).length;
+          emit(
+            runId,
+            "agent.trace",
+            {
+              text: `已保存本次涉及的 ${saveResults.length} 个文档，${changedCount} 个存在变更。`,
+            },
+            send,
+          );
         }
 
         // 正常完成，更新状态并发送完成事件

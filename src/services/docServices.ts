@@ -5,6 +5,7 @@
 import fs from "fs/promises";
 import { existsSync, mkdirSync } from "fs";
 import path from "path";
+import { createHash } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 
 // uploads 目录 — 所有上传文档及其元数据的存放位置
@@ -33,6 +34,20 @@ export interface DocumentMetadata {
   mimeType: string;     // MIME 类型
   uploadedAt: string;   // 上传时间（ISO 8601 格式）
   filePath: string;     // 文件在服务器上的相对路径（如 /uploads/xxx.docx）
+  lastSavedHash?: string; // 最近一次保存的文件 hash，用于避免无差异覆盖
+  lastSavedAt?: string;   // 最近一次保存时间
+}
+
+function sha256(buffer: Buffer): string {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function writeMetadata(metadata: DocumentMetadata): Promise<void> {
+  await fs.writeFile(
+    path.join(UPLOAD_DIR, `${metadata.id}.json`),
+    JSON.stringify(metadata, null, 2),
+    "utf8",
+  );
 }
 
 // saveDocument — 保存上传文件到磁盘并生成元数据
@@ -54,6 +69,7 @@ export async function saveDocument(file: {
   const filePath = path.join(UPLOAD_DIR, storedFilename);
 
   await fs.writeFile(filePath, file.buffer);
+  const initialHash = sha256(file.buffer);
 
   const metadata: DocumentMetadata = {
     id: fileId,
@@ -64,11 +80,12 @@ export async function saveDocument(file: {
     mimeType: file.mimetype,
     uploadedAt: new Date().toISOString(),
     filePath: `/uploads/${storedFilename}`,
+    lastSavedHash: initialHash,
+    lastSavedAt: new Date().toISOString(),
   };
 
   // 元数据以 JSON 文件形式与文档文件并列存放，方便直接扫描
-  const metadataPath = path.join(UPLOAD_DIR, `${fileId}.json`);
-  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
+  await writeMetadata(metadata);
 
   return metadata;
 }
@@ -91,6 +108,22 @@ export async function getDocumentList(): Promise<DocumentMetadata[]> {
       const doc = JSON.parse(content) as DocumentMetadata;
       // 兼容旧数据：如果 roomName 字段缺失，默认设为 id
       if (!doc.roomName) doc.roomName = doc.id;
+      const docPath = path.join(UPLOAD_DIR, doc.storedName);
+      try {
+        await fs.access(docPath);
+      } catch {
+        await fs.unlink(path.join(UPLOAD_DIR, f)).catch(() => {});
+        console.warn(
+          `[DocServices] 已移除缺失源文件的元数据: ${doc.originalName} (${doc.id})`,
+        );
+        continue;
+      }
+      if (!doc.lastSavedHash) {
+        const buffer = await fs.readFile(docPath);
+        doc.lastSavedHash = sha256(buffer);
+        doc.lastSavedAt = doc.uploadedAt;
+        await writeMetadata(doc);
+      }
       documents.push(doc);
     } catch {
       // 损坏的元数据文件不影响列表完整性
@@ -114,6 +147,13 @@ export async function getDocumentById(id: string): Promise<DocumentMetadata | nu
     const content = await fs.readFile(metadataPath, "utf-8");
     const doc = JSON.parse(content) as DocumentMetadata;
     if (!doc.roomName) doc.roomName = doc.id;
+    if (!doc.lastSavedHash) {
+      const docPath = path.join(UPLOAD_DIR, doc.storedName);
+      const buffer = await fs.readFile(docPath);
+      doc.lastSavedHash = sha256(buffer);
+      doc.lastSavedAt = doc.uploadedAt;
+      await writeMetadata(doc);
+    }
     return doc;
   } catch {
     return null;
@@ -136,6 +176,52 @@ export async function getDocumentFile(
   } catch {
     return null;
   }
+}
+
+export async function saveDocumentContent(
+  id: string,
+  buffer: Buffer,
+): Promise<{ saved: boolean; hash: string; metadata: DocumentMetadata }> {
+  const metadata = await getDocumentById(id);
+  if (!metadata) {
+    throw new Error(`文档不存在: ${id}`);
+  }
+
+  const hash = sha256(buffer);
+  if (metadata.lastSavedHash === hash) {
+    return { saved: false, hash, metadata };
+  }
+
+  await fs.writeFile(path.join(UPLOAD_DIR, metadata.storedName), buffer);
+  metadata.size = buffer.byteLength;
+  metadata.lastSavedHash = hash;
+  metadata.lastSavedAt = new Date().toISOString();
+  await writeMetadata(metadata);
+
+  return { saved: true, hash, metadata };
+}
+
+export async function refreshSavedStateFromDisk(
+  id: string,
+): Promise<{ saved: boolean; hash: string; metadata: DocumentMetadata }> {
+  const metadata = await getDocumentById(id);
+  if (!metadata) {
+    throw new Error(`文档不存在: ${id}`);
+  }
+
+  const filePath = path.join(UPLOAD_DIR, metadata.storedName);
+  const buffer = await fs.readFile(filePath);
+  const hash = sha256(buffer);
+  const saved = metadata.lastSavedHash !== hash;
+
+  if (saved) {
+    metadata.size = buffer.byteLength;
+    metadata.lastSavedHash = hash;
+    metadata.lastSavedAt = new Date().toISOString();
+    await writeMetadata(metadata);
+  }
+
+  return { saved, hash, metadata };
 }
 
 // deleteDocument — 删除文档及其元数据
