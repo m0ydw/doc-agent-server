@@ -118,7 +118,7 @@ export type TableTargetInput = {
 
 export type TableLayoutInput = {
   alignment?: "left" | "center" | "right";
-  autoFitMode?: "fixedWidth" | "autoFit" | "autoFitWindow";
+  autoFitMode?: "fixedWidth" | "fitContents" | "fitWindow";
   preferredWidth?: number;
 };
 
@@ -176,6 +176,7 @@ interface TextBlockInfo {
   blockIndex: number;
   ref: string;
   nodeType?: string;
+  length: number;
   text: string;
 }
 
@@ -602,6 +603,7 @@ export async function inspectTextBlocks(
         blockIndex: offset + index,
         ref: block.nodeId,
         nodeType: block.nodeType ?? block.type,
+        length: text.length,
         text: text.length > previewLimit ? text.slice(0, previewLimit) : text,
       };
     }),
@@ -626,35 +628,27 @@ export async function readTextBlock(
 ): Promise<string> {
   const doc = await getSession(docId);
   const text = await readBlockFullTextByRef(doc, ref);
-  return JSON.stringify({ ref, text }, null, 2);
+  return JSON.stringify({ ref, length: text.length, text }, null, 2);
 }
 
-export async function insertTextAfterBlock(
+export async function insertTextAtBlockOffset(
   docId: string,
   ref: string,
+  offset: number,
   text: string,
 ): Promise<string> {
   const doc = await getSession(docId);
-  const target: BlockAddress = {
-    kind: "block",
-    nodeType: "paragraph",
-    nodeId: ref,
-  };
-  const edge = { kind: "nodeEdge" as const, node: target, edge: "after" as const };
+  const position = { kind: "text" as const, blockId: ref, offset };
   await doc.insert({
     target: {
       kind: "selection",
-      start: edge,
-      end: edge,
+      start: position,
+      end: position,
     },
-    content: [
-      {
-        type: "paragraph",
-        children: [{ type: "text", text }],
-      },
-    ],
+    type: "text",
+    value: text,
   });
-  return JSON.stringify({ success: true, ref, text }, null, 2);
+  return JSON.stringify({ success: true, ref, offset, text }, null, 2);
 }
 
 // 多单元格写入只是对单次 setText SDK 封装的循环包装；权限和审批逻辑放在 agentTools。

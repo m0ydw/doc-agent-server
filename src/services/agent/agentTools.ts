@@ -77,7 +77,8 @@ const tableFormatSchema = z.object({
     .object({
       alignment: z.enum(["left", "center", "right"]).optional(),
       autoFitMode: z
-        .enum(["fixedWidth", "autoFit", "autoFitWindow"])
+        .enum(["fixedWidth", "fitContents", "fitWindow"])
+        .describe("Only use fixedWidth, fitContents, or fitWindow.")
         .optional(),
       preferredWidth: z.number().optional(),
     })
@@ -396,7 +397,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     read_table_style: tool({
       description:
-        "读取 DOCX 表格的属性和可用样式。先用 tableIndex 或 tableRef 定位表格，再返回 properties/styles，适合做样式诊断或格式刷前的取样。",
+        "读取一个表格的 properties/styles。用 target.tableIndex 或 target.tableRef 定位。只读。",
       inputSchema: z.object({
         documentName: z.string().optional(),
         target: tableTargetSchema.default({ tableIndex: 0 }),
@@ -422,7 +423,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     apply_table_format: tool({
       description:
-        "设置 DOCX 表格格式。支持布局、样式选项、边框、底纹、单元格内边距；这是写操作，read_only 模式会阻止执行。",
+        "设置一个表格格式。autoFitMode 只能是 fixedWidth、fitContents、fitWindow。边框用 top/bottom/left/right/insideH/insideV。",
       inputSchema: tableFormatSchema,
       execute: async ({ documentName, ...formatInput }) =>
         withToolEvents(
@@ -453,7 +454,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     inspect_text_blocks: tool({
       description:
-        "低 token 扫描 DOCX 段落/text block，返回 blockIndex、ref 和短预览。需要段落 ref 做插入或精确读取时，先调用这个工具。",
+        "低 token 扫描段落/text block，返回 ref、length、短预览。插入到末尾时用 offset=length。",
       inputSchema: z.object({
         documentName: z.string().optional(),
         offset: z.number().default(0),
@@ -487,7 +488,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     read_text_block: tool({
       description:
-        "按段落/text block ref 读取完整文本。ref 通常来自 inspect_text_blocks。",
+        "按 inspect_text_blocks 返回的 ref 读取完整文本，并返回 length。",
       inputSchema: z.object({
         documentName: z.string().optional(),
         ref: z.string().min(1),
@@ -504,35 +505,36 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         }),
     }),
 
-    insert_text_after_block: tool({
+    insert_text_at_block_offset: tool({
       description:
-        "在指定段落/text block 后插入新段落。ref 必须来自 inspect_text_blocks/read_text_block。",
+        "在 text block 内按字符 offset 插入纯文本。ref 来自 inspect_text_blocks；追加到末尾用 offset=length。",
       inputSchema: z.object({
         documentName: z.string().optional(),
         ref: z.string().min(1),
+        offset: z.number().int().min(0),
         text: z.string(),
       }),
-      execute: async ({ documentName, ref, text }) =>
+      execute: async ({ documentName, ref, offset, text }) =>
         withToolEvents(
           emit,
-          "insert_text_after_block",
-          { documentName, ref, text, permissionMode: run.permissionMode },
+          "insert_text_at_block_offset",
+          { documentName, ref, offset, text, permissionMode: run.permissionMode },
           async () => {
             const doc = requireDocument(run, documentName);
             if (run.permissionMode === "read_only") {
               return {
                 status: "blocked",
                 summary: "当前是 read_only 模式，不能插入文本。",
-                detail: { ref, text },
+                detail: { ref, offset, text },
               };
             }
 
             const result = parseJsonResult(
-              await editor.insertTextAfterBlock(doc.id, ref, text),
+              await editor.insertTextAtBlockOffset(doc.id, ref, offset, text),
             );
             return {
               status: "ok",
-              summary: `已在 ${doc.name} 的文本块后插入段落。`,
+              summary: `已在 ${doc.name} 的文本块 offset=${offset} 插入文本。`,
               detail: result,
             };
           },

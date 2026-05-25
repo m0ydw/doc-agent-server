@@ -20,7 +20,7 @@ export const readTableStyle = formatOperations.readTableStyle;
 export const applyTableFormat = formatOperations.applyTableFormat;
 export const inspectTextBlocks = formatOperations.inspectTextBlocks;
 export const readTextBlock = formatOperations.readTextBlock;
-export const insertTextAfterBlock = formatOperations.insertTextAfterBlock;
+export const insertTextAtBlockOffset = formatOperations.insertTextAtBlockOffset;
 /**
  * 【新增】单元格批量写入函数
  * 
@@ -57,7 +57,7 @@ export default {
   applyTableFormat,
   inspectTextBlocks,
   readTextBlock,
-  insertTextAfterBlock,
+  insertTextAtBlockOffset,
   writeCellsText,
   verifyCells,
 };
