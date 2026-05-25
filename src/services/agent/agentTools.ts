@@ -29,6 +29,12 @@ type ToolResult = {
   detail?: unknown;
 };
 
+function mutationOptionsForPermission(permissionMode: AgentRun["permissionMode"]) {
+  return permissionMode === "auto_tracked"
+    ? ({ changeMode: "tracked" } as const)
+    : undefined;
+}
+
 const cellWriteSchema = z.object({
   documentName: z
     .string()
@@ -182,7 +188,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     replace_text: tool({
       description:
-        "查找并替换 DOCX 文本。会根据权限模式阻塞、发起审批或直接替换。替换前会先查找匹配项。",
+        "查找并替换 DOCX 文本。会根据权限模式阻塞、发起审批、以修订模式替换或直接替换。替换前会先查找匹配项。",
       inputSchema: replaceTextSchema,
       execute: async ({ documentName, targetText, replacement, replaceAll, reason }, options) =>
         withToolEvents(
@@ -245,11 +251,22 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 text: replacement,
                 reason,
               })),
+              mutationOptionsForPermission(run.permissionMode),
             );
+            const successful = replaceResult.filter((item) => item.success).length;
+            const modeText =
+              run.permissionMode === "auto_tracked" ? "以修订模式" : "直接";
             return {
               status: "ok",
-              summary: `已在《${doc.name}》替换 ${replaceResult.filter((item) => item.success).length} 处“${targetText}”。`,
-              detail: { documentName: doc.name, targetText, replacement, replaceResult },
+              summary: `已在《${doc.name}》${modeText}替换 ${successful} 处“${targetText}”。`,
+              detail: {
+                documentName: doc.name,
+                targetText,
+                replacement,
+                changeMode:
+                  run.permissionMode === "auto_tracked" ? "tracked" : "default",
+                replaceResult,
+              },
             };
           },
         ),
@@ -355,7 +372,7 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
 
     write_cells_text: tool({
       description:
-        "批量写入单元格。会根据权限模式阻塞、发起审批、以修订尝试写入或直接写入。",
+        "批量写入单元格。会根据权限模式阻塞、发起审批、以修订模式写入或直接写入。",
       inputSchema: z.object({
         documentName: z.string().optional(),
         cells: z.array(cellWriteSchema).min(1),
@@ -406,19 +423,24 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               };
             }
 
+            const mutationOptions = mutationOptionsForPermission(run.permissionMode);
+            const writeResult = await editor.writeCellsText(
+              doc.id,
+              cells,
+              mutationOptions,
+            );
+            const successCount = writeResult.filter((item) => item.success).length;
             if (run.permissionMode === "auto_tracked") {
-              const result = await editor.writeCellsTextTracked(
-                doc.id,
-                cells,
-              );
               return {
-                status: result.success ? "ok" : "error",
-                summary: result.message,
-                detail: result,
-              } as ToolResult;
+                status: writeResult.every((item) => item.success) ? "ok" : "error",
+                summary: `已以修订模式写入 ${successCount} 个单元格，等待前端审阅 UI 接受或拒绝。`,
+                detail: {
+                  changeMode: "tracked",
+                  writeResult,
+                },
+              };
             }
 
-            const writeResult = await editor.writeCellsText(doc.id, cells);
             const verifyResult = await editor.verifyCells(doc.id, cells);
             return {
               status: "ok",

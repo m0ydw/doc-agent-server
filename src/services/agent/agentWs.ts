@@ -10,7 +10,12 @@ import {
   resolvePendingApproval,
 } from "./agentSessionManager";
 import { runAgent } from "./agentRunner";
-import type { AgentEvent, AgentStartPayload, ApprovalResolution } from "./agentTypes";
+import type {
+  AgentEvent,
+  AgentStartPayload,
+  ApprovalResolution,
+  PermissionMode,
+} from "./agentTypes";
 
 type ClientMessage =
   | { type: "agent.start"; payload: AgentStartPayload }
@@ -44,6 +49,19 @@ function sendRaw(
   send(ws, { type, runId, payload, ts: Date.now() });
 }
 
+const allowedPermissionModes = new Set<PermissionMode>([
+  "read_only",
+  "review_required",
+  "auto_tracked",
+  "auto_apply",
+]);
+
+function normalizePermissionMode(mode: unknown): PermissionMode {
+  return allowedPermissionModes.has(mode as PermissionMode)
+    ? (mode as PermissionMode)
+    : "review_required";
+}
+
 function normalizeStartPayload(payload: AgentStartPayload): AgentStartPayload {
   const documents =
     payload.documents?.length
@@ -54,7 +72,7 @@ function normalizeStartPayload(payload: AgentStartPayload): AgentStartPayload {
   return {
     ...payload,
     documents,
-    permissionMode: payload.permissionMode || "review_required",
+    permissionMode: normalizePermissionMode(payload.permissionMode),
     llm: {
       provider: "deepseek",
       apiKey: payload.llm?.apiKey || "",

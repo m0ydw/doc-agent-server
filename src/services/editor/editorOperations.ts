@@ -3,6 +3,7 @@
 // SDK 调用方式：使用 doc.query.match 查找、doc.mutations.apply 执行变更
 
 import * as sessionManager from "../session";
+import { setText, type MutationApplyOptions } from "./formatOperations";
 
 // getDocumentSession — 通过会话管理器获取 SDK 文档句柄
 // 内部 helper，供所有编辑操作复用
@@ -67,12 +68,7 @@ export async function replaceFirst(docId: string, targetText: string, replacemen
     if (!matchResult.items || matchResult.items.length === 0) throw new Error("未找到匹配内容");
     const refValue = matchResult.items[0].handle ? matchResult.items[0].handle.ref : null;
     if (!refValue) throw new Error("无法获取替换位置");
-    const stepsArray: any[] = [{ id: "replace-1", op: "text.rewrite", where: { by: "ref", ref: refValue }, args: { replacement: { text: replacement } }}];
-    const applyParams: any = {
-      atomic: true,
-      steps: stepsArray,
-    };
-    await doc.mutations.apply(applyParams);
+    await setText(docId, refValue, replacement);
     console.log("[Editor] 替换第一个: " + targetText + " -> " + replacement + " - 成功");
     return { success: true, replaced: 1 };
   } catch (e: unknown) {
@@ -91,17 +87,18 @@ export async function replaceAll(docId: string, targetText: string, replacement:
     const matchResult: any = await doc.query.match({ select: { type: "text", pattern: targetText }, require: "any" });
     if (!matchResult.items || matchResult.items.length === 0) return { success: true, replaced: 0 };
     const items = matchResult.items;
-    const stepsArray: any[] = [];
+    const replacements: RefReplacement[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const ref = item.handle ? item.handle.ref : null;
       if (!ref) continue;
-      stepsArray.push({ id: "replace-" + i, op: "text.rewrite", where: { by: "ref", ref: ref }, args: { replacement: { text: replacement } } });
+      replacements.push({ ref, text: replacement });
     }
-    if (stepsArray.length === 0) return { success: true, replaced: 0 };
-    await doc.mutations.apply({ atomic: true, steps: stepsArray });
-    console.log("[Editor] 替换全部: " + targetText + " -> " + replacement + " - 替换了 " + stepsArray.length + " 处");
-    return { success: true, replaced: stepsArray.length };
+    if (replacements.length === 0) return { success: true, replaced: 0 };
+    const results = await replaceByRefs(docId, replacements);
+    const replaced = results.filter((item) => item.success).length;
+    console.log("[Editor] 替换全部: " + targetText + " -> " + replacement + " - 替换了 " + replaced + " 处");
+    return { success: true, replaced };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "未知错误";
     console.error("[Editor] 替换失败:", msg);
@@ -112,28 +109,15 @@ export async function replaceAll(docId: string, targetText: string, replacement:
 export async function replaceByRefs(
   docId: string,
   replacements: RefReplacement[],
+  options?: MutationApplyOptions,
 ): Promise<Array<RefReplacement & { success: boolean; error?: string }>> {
   if (!replacements.length) return [];
 
-  const doc: any = await getDocumentSession(docId);
   const results: Array<RefReplacement & { success: boolean; error?: string }> = [];
 
   for (const replacement of replacements) {
     try {
-      await doc.mutations.apply({
-        atomic: true,
-        steps: [
-          {
-            id: `replace-ref-${results.length}`,
-            op: "text.rewrite",
-            where: { by: "ref", ref: replacement.ref },
-            args: {
-              replacement: { text: replacement.text },
-              style: { inline: { mode: "preserve" } },
-            },
-          },
-        ],
-      });
+      await setText(docId, replacement.ref, replacement.text, options);
       results.push({ ...replacement, success: true });
     } catch (error) {
       results.push({

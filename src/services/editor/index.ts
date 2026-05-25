@@ -36,16 +36,6 @@ export const writeCellsText = formatOperations.writeCellsText;
  */
 export const verifyCells = formatOperations.verifyCells;
 
-/**
- * 【新增】修订模式写入函数（预留接口）
- * 
- * 以修订模式写入单元格，保留修改痕迹。
- * 当前版本暂未实现，返回失败。
- * 
- * @see formatOperations.writeCellsTextTracked - 详细实现
- */
-export const writeCellsTextTracked = formatOperations.writeCellsTextTracked;
-
 export default {
   findText,
   replaceFirst,
@@ -60,5 +50,4 @@ export default {
   readTableCellText,
   writeCellsText,
   verifyCells,
-  writeCellsTextTracked,
 };
