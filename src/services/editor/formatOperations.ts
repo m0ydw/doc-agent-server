@@ -105,6 +105,56 @@ type TableAddress = {
   nodeId: string;
 };
 
+type BlockAddress = {
+  kind: "block";
+  nodeType: "paragraph";
+  nodeId: string;
+};
+
+export type TableTargetInput = {
+  tableIndex?: number;
+  tableRef?: string;
+};
+
+export type TableLayoutInput = {
+  alignment?: "left" | "center" | "right";
+  autoFitMode?: "fixedWidth" | "autoFit" | "autoFitWindow";
+  preferredWidth?: number;
+};
+
+export type TableStyleOptionsInput = {
+  headerRow?: boolean;
+  lastRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  bandedRows?: boolean;
+  bandedColumns?: boolean;
+};
+
+export type TableBorderInput = {
+  lineStyle?: string;
+  lineWeightPt?: number;
+  color?: string;
+};
+
+export type TableFormatInput = {
+  target: TableTargetInput;
+  layout?: TableLayoutInput;
+  styleOptions?: TableStyleOptionsInput;
+  borders?: Partial<
+    Record<"top" | "bottom" | "left" | "right" | "insideH" | "insideV", TableBorderInput>
+  >;
+  shading?: {
+    fill: string;
+  };
+  padding?: {
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+  };
+};
+
 type RawTableCell = {
   nodeId: string;
   rowIndex: number;
@@ -119,6 +169,13 @@ interface TableCellInfo {
   rowspan: number;
   colspan: number;
   ref: string;
+  text: string;
+}
+
+interface TextBlockInfo {
+  blockIndex: number;
+  ref: string;
+  nodeType?: string;
   text: string;
 }
 
@@ -221,18 +278,30 @@ async function readCellFullTextByRef(doc: any, ref: string): Promise<string> {
   const data = await doc.getNodeById({ id: ref });
   //测试
   //tablestyle的获取
-  const table = await getTableByIndex(doc, 0);
-  const temp = await doc.tables.getProperties({
-    target: table,
-  });
-  const temp2 = await doc.tables.getStyles({
-    target: table,
-  });
+  //加到文档末尾
+  // await doc.insert({ ref: "cell-auto-3ca8129e", value: "测试", type: "text" });
 
-  console.log(temp);
-  console.log(temp2);
-  console.log(data);
-  //
+  //// 模式 2：target.kind = "block"
+  // 在某个 block 前/后插入结构化内容
+  // await doc.insert({
+  //   target: {
+  //     kind: "block",
+  //     nodeId: "paragraph-auto-a12b34c",
+  //   },
+  //   position: "after",
+  //   content: [
+  //     {
+  //       type: "paragraph",
+  //       children: [
+  //         {
+  //           type: "text",
+  //           text: "这是新插入的段落",
+  //         },
+  //       ],
+  //     },
+  //   ],
+  // });
+
   return extractNodeText(data);
 }
 
@@ -256,6 +325,41 @@ async function getTableByIndex(
     []) as Array<{ nodeId: string }>;
   if (!blocks.length) return null;
   return { kind: "block", nodeType: "table", nodeId: blocks[0].nodeId };
+}
+
+function getTableByRef(tableRef: string): TableAddress {
+  return { kind: "block", nodeType: "table", nodeId: tableRef };
+}
+
+async function resolveTableTarget(
+  doc: any,
+  target: TableTargetInput,
+): Promise<TableAddress | null> {
+  if (target.tableRef) return getTableByRef(target.tableRef);
+  return getTableByIndex(doc, target.tableIndex ?? 0);
+}
+
+async function getBlocks(
+  doc: any,
+  nodeTypes: string[],
+  limit: number,
+  offset: number,
+): Promise<Array<{ nodeId: string; nodeType?: string; type?: string }>> {
+  const result = await doc.blocks.list({
+    nodeTypes,
+    offset,
+    limit,
+  } as Record<string, unknown>);
+  return (((result as Record<string, unknown>).blocks || []) as Array<{
+    nodeId: string;
+    nodeType?: string;
+    type?: string;
+  }>);
+}
+
+async function readBlockFullTextByRef(doc: any, ref: string): Promise<string> {
+  const data = await doc.getNodeById({ id: ref });
+  return extractNodeText(data);
 }
 
 export async function inspectDocumentStructure(docId: string): Promise<string> {
@@ -376,6 +480,181 @@ export async function readTableCellText(
 ): Promise<string> {
   const doc = await getSession(docId);
   return readCellFullTextByRef(doc, cellRef);
+}
+
+export async function readTableStyle(
+  docId: string,
+  target: TableTargetInput = { tableIndex: 0 },
+): Promise<string> {
+  const doc = await getSession(docId);
+  const table = await resolveTableTarget(doc, target);
+  if (!table) return JSON.stringify({ error: "table not found", target });
+
+  const [properties, styles] = await Promise.all([
+    doc.tables.getProperties({ target: table }),
+    doc.tables.getStyles({ target: table }),
+  ]);
+
+  return JSON.stringify(
+    {
+      target: {
+        tableIndex: target.tableIndex,
+        tableRef: table.nodeId,
+      },
+      properties,
+      styles,
+    },
+    null,
+    2,
+  );
+}
+
+export async function applyTableFormat(
+  docId: string,
+  input: TableFormatInput,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const table = await resolveTableTarget(doc, input.target);
+  if (!table) {
+    return JSON.stringify({ error: "table not found", target: input.target });
+  }
+
+  const applied: string[] = [];
+
+  if (input.layout) {
+    await doc.tables.setLayout({
+      target: table,
+      ...input.layout,
+    });
+    applied.push("layout");
+  }
+
+  if (input.styleOptions) {
+    await doc.tables.applyStyle({
+      target: table,
+      styleOptions: input.styleOptions,
+    });
+    applied.push("styleOptions");
+  }
+
+  if (input.borders) {
+    await doc.tables.setBorders({
+      target: table,
+      mode: "set",
+      edges: input.borders,
+    });
+    applied.push("borders");
+  }
+
+  if (input.shading) {
+    await doc.tables.setShading({
+      target: table,
+      color: input.shading.fill,
+    });
+    applied.push("shading");
+  }
+
+  if (input.padding) {
+    await doc.tables.setTablePadding({
+      target: table,
+      topPt: input.padding.top,
+      rightPt: input.padding.right,
+      bottomPt: input.padding.bottom,
+      leftPt: input.padding.left,
+    });
+    applied.push("padding");
+  }
+
+  return JSON.stringify(
+    {
+      success: true,
+      target: {
+        tableIndex: input.target.tableIndex,
+        tableRef: table.nodeId,
+      },
+      applied,
+    },
+    null,
+    2,
+  );
+}
+
+export async function inspectTextBlocks(
+  docId: string,
+  options: {
+    offset?: number;
+    limit?: number;
+    previewLimit?: number;
+    nodeTypes?: string[];
+  } = {},
+): Promise<string> {
+  const doc = await getSession(docId);
+  const offset = options.offset ?? 0;
+  const limit = Math.min(options.limit ?? 50, 100);
+  const previewLimit = options.previewLimit ?? CELL_PREVIEW_LIMIT;
+  const nodeTypes = options.nodeTypes ?? ["paragraph"];
+  const blocks = await getBlocks(doc, nodeTypes, limit, offset);
+
+  const textBlocks: TextBlockInfo[] = await Promise.all(
+    blocks.map(async (block, index) => {
+      const text = await readBlockFullTextByRef(doc, block.nodeId);
+      return {
+        blockIndex: offset + index,
+        ref: block.nodeId,
+        nodeType: block.nodeType ?? block.type,
+        text: text.length > previewLimit ? text.slice(0, previewLimit) : text,
+      };
+    }),
+  );
+
+  return JSON.stringify(
+    {
+      offset,
+      limit,
+      nodeTypes,
+      count: textBlocks.length,
+      blocks: textBlocks,
+    },
+    null,
+    2,
+  );
+}
+
+export async function readTextBlock(
+  docId: string,
+  ref: string,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const text = await readBlockFullTextByRef(doc, ref);
+  return JSON.stringify({ ref, text }, null, 2);
+}
+
+export async function insertTextAfterBlock(
+  docId: string,
+  ref: string,
+  text: string,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const target: BlockAddress = {
+    kind: "block",
+    nodeType: "paragraph",
+    nodeId: ref,
+  };
+  const edge = { kind: "nodeEdge" as const, node: target, edge: "after" as const };
+  await doc.insert({
+    target: {
+      kind: "selection",
+      start: edge,
+      end: edge,
+    },
+    content: [
+      {
+        type: "paragraph",
+        children: [{ type: "text", text }],
+      },
+    ],
+  });
+  return JSON.stringify({ success: true, ref, text }, null, 2);
 }
 
 // 多单元格写入只是对单次 setText SDK 封装的循环包装；权限和审批逻辑放在 agentTools。

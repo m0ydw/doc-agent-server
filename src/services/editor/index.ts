@@ -16,6 +16,11 @@ export const applyFormat = formatOperations.applyFormat;
 export const inspectDocumentStructure = formatOperations.inspectDocumentStructure;
 export const readTableContent = formatOperations.readTableContent;
 export const readTableCellText = formatOperations.readTableCellText;
+export const readTableStyle = formatOperations.readTableStyle;
+export const applyTableFormat = formatOperations.applyTableFormat;
+export const inspectTextBlocks = formatOperations.inspectTextBlocks;
+export const readTextBlock = formatOperations.readTextBlock;
+export const insertTextAfterBlock = formatOperations.insertTextAfterBlock;
 /**
  * 【新增】单元格批量写入函数
  * 
@@ -48,6 +53,11 @@ export default {
   inspectDocumentStructure,
   readTableContent,
   readTableCellText,
+  readTableStyle,
+  applyTableFormat,
+  inspectTextBlocks,
+  readTextBlock,
+  insertTextAfterBlock,
   writeCellsText,
   verifyCells,
 };

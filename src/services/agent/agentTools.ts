@@ -59,6 +59,64 @@ const replaceTextSchema = z.object({
   reason: z.string().optional().describe("为什么要做这次替换"),
 });
 
+const tableTargetSchema = z.object({
+  tableIndex: z.number().optional(),
+  tableRef: z.string().optional(),
+});
+
+const tableBorderSchema = z.object({
+  lineStyle: z.string().optional(),
+  lineWeightPt: z.number().optional(),
+  color: z.string().optional(),
+});
+
+const tableFormatSchema = z.object({
+  documentName: z.string().optional(),
+  target: tableTargetSchema.default({ tableIndex: 0 }),
+  layout: z
+    .object({
+      alignment: z.enum(["left", "center", "right"]).optional(),
+      autoFitMode: z
+        .enum(["fixedWidth", "autoFit", "autoFitWindow"])
+        .optional(),
+      preferredWidth: z.number().optional(),
+    })
+    .optional(),
+  styleOptions: z
+    .object({
+      headerRow: z.boolean().optional(),
+      lastRow: z.boolean().optional(),
+      firstColumn: z.boolean().optional(),
+      lastColumn: z.boolean().optional(),
+      bandedRows: z.boolean().optional(),
+      bandedColumns: z.boolean().optional(),
+    })
+    .optional(),
+  borders: z
+    .object({
+      top: tableBorderSchema.optional(),
+      bottom: tableBorderSchema.optional(),
+      left: tableBorderSchema.optional(),
+      right: tableBorderSchema.optional(),
+      insideH: tableBorderSchema.optional(),
+      insideV: tableBorderSchema.optional(),
+    })
+    .optional(),
+  shading: z
+    .object({
+      fill: z.string(),
+    })
+    .optional(),
+  padding: z
+    .object({
+      top: z.number(),
+      bottom: z.number(),
+      left: z.number(),
+      right: z.number(),
+    })
+    .optional(),
+});
+
 function parseJsonResult(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -334,6 +392,151 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             detail: { ref, text },
           };
         }),
+    }),
+
+    read_table_style: tool({
+      description:
+        "读取 DOCX 表格的属性和可用样式。先用 tableIndex 或 tableRef 定位表格，再返回 properties/styles，适合做样式诊断或格式刷前的取样。",
+      inputSchema: z.object({
+        documentName: z.string().optional(),
+        target: tableTargetSchema.default({ tableIndex: 0 }),
+      }),
+      execute: async ({ documentName, target }) =>
+        withToolEvents(
+          emit,
+          "read_table_style",
+          { documentName, target },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.readTableStyle(doc.id, target),
+            );
+            return {
+              status: "ok",
+              summary: `已读取 ${doc.name} 的表格样式：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
+    }),
+
+    apply_table_format: tool({
+      description:
+        "设置 DOCX 表格格式。支持布局、样式选项、边框、底纹、单元格内边距；这是写操作，read_only 模式会阻止执行。",
+      inputSchema: tableFormatSchema,
+      execute: async ({ documentName, ...formatInput }) =>
+        withToolEvents(
+          emit,
+          "apply_table_format",
+          { documentName, formatInput, permissionMode: run.permissionMode },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            if (run.permissionMode === "read_only") {
+              return {
+                status: "blocked",
+                summary: "当前是 read_only 模式，不能修改表格格式。",
+                detail: formatInput,
+              };
+            }
+
+            const result = parseJsonResult(
+              await editor.applyTableFormat(doc.id, formatInput),
+            );
+            return {
+              status: "ok",
+              summary: `已设置 ${doc.name} 的表格格式：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
+    }),
+
+    inspect_text_blocks: tool({
+      description:
+        "低 token 扫描 DOCX 段落/text block，返回 blockIndex、ref 和短预览。需要段落 ref 做插入或精确读取时，先调用这个工具。",
+      inputSchema: z.object({
+        documentName: z.string().optional(),
+        offset: z.number().default(0),
+        limit: z.number().default(50),
+        previewLimit: z.number().default(20),
+        nodeTypes: z.array(z.string()).optional(),
+      }),
+      execute: async ({ documentName, offset, limit, previewLimit, nodeTypes }) =>
+        withToolEvents(
+          emit,
+          "inspect_text_blocks",
+          { documentName, offset, limit, previewLimit, nodeTypes },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.inspectTextBlocks(doc.id, {
+                offset,
+                limit,
+                previewLimit,
+                nodeTypes,
+              }),
+            );
+            return {
+              status: "ok",
+              summary: `已扫描 ${doc.name} 的文本块：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
+    }),
+
+    read_text_block: tool({
+      description:
+        "按段落/text block ref 读取完整文本。ref 通常来自 inspect_text_blocks。",
+      inputSchema: z.object({
+        documentName: z.string().optional(),
+        ref: z.string().min(1),
+      }),
+      execute: async ({ documentName, ref }) =>
+        withToolEvents(emit, "read_text_block", { documentName, ref }, async () => {
+          const doc = requireDocument(run, documentName);
+          const result = parseJsonResult(await editor.readTextBlock(doc.id, ref));
+          return {
+            status: "ok",
+            summary: `已读取 ${doc.name} 的文本块：${toSummaryText(result)}`,
+            detail: result,
+          };
+        }),
+    }),
+
+    insert_text_after_block: tool({
+      description:
+        "在指定段落/text block 后插入新段落。ref 必须来自 inspect_text_blocks/read_text_block。",
+      inputSchema: z.object({
+        documentName: z.string().optional(),
+        ref: z.string().min(1),
+        text: z.string(),
+      }),
+      execute: async ({ documentName, ref, text }) =>
+        withToolEvents(
+          emit,
+          "insert_text_after_block",
+          { documentName, ref, text, permissionMode: run.permissionMode },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            if (run.permissionMode === "read_only") {
+              return {
+                status: "blocked",
+                summary: "当前是 read_only 模式，不能插入文本。",
+                detail: { ref, text },
+              };
+            }
+
+            const result = parseJsonResult(
+              await editor.insertTextAfterBlock(doc.id, ref, text),
+            );
+            return {
+              status: "ok",
+              summary: `已在 ${doc.name} 的文本块后插入段落。`,
+              detail: result,
+            };
+          },
+        ),
     }),
 
     dry_run_write_cells: tool({
