@@ -25,13 +25,9 @@ export function createRun(payload: AgentStartPayload): AgentRun {
         ? [{ id: payload.docId, name: "当前文档", active: true }]
         : [];
   const activeDoc = documents.find((doc) => doc.active) ?? documents[0];
-  if (!activeDoc) {
-    throw new Error("Agent 至少需要一个可操作文档");
-  }
-
   const run: AgentRun = {
     runId,
-    activeDocId: activeDoc.id,
+    activeDocId: activeDoc?.id ?? null,
     documents,
     prompt: payload.prompt,
     permissionMode: payload.permissionMode,

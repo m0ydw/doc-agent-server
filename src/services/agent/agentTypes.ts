@@ -87,7 +87,7 @@ export type AgentRunStatus =
 
 export type AgentRun = {
   runId: string;
-  activeDocId: string;
+  activeDocId: string | null;
   documents: AgentDocumentRef[];
   prompt: string;
   permissionMode: PermissionMode;

@@ -70,6 +70,7 @@ export async function applyFormat(
     select: { type: "text", pattern },
     require: "any",
   });
+  console.log(matchResult);
   if (!matchResult.items?.length) return `未找到匹配 "${pattern}"`;
 
   const steps = matchResult.items
@@ -142,7 +143,10 @@ export type TableFormatInput = {
   layout?: TableLayoutInput;
   styleOptions?: TableStyleOptionsInput;
   borders?: Partial<
-    Record<"top" | "bottom" | "left" | "right" | "insideH" | "insideV", TableBorderInput>
+    Record<
+      "top" | "bottom" | "left" | "right" | "insideH" | "insideV",
+      TableBorderInput
+    >
   >;
   shading?: {
     fill: string;
@@ -179,6 +183,91 @@ interface TextBlockInfo {
   length: number;
   text: string;
 }
+
+export type TextMatchMode = "contains" | "regex";
+
+export type TextTargetQueryInput = {
+  pattern: string;
+  mode?: TextMatchMode;
+  caseSensitive?: boolean;
+  nodeId?: string;
+  nodeType?: string;
+  blockId?: string;
+  ref?: string;
+  withinNodeId?: string;
+  withinNodeType?: string;
+  matchIndex?: number;
+  all?: boolean;
+};
+
+export type InlineTextStyleInput = {
+  bold?: boolean;
+  italic?: boolean;
+  underline?:
+    | boolean
+    | {
+        style?: string;
+        color?: string;
+        themeColor?: string;
+      };
+  strike?: boolean;
+  color?: string;
+  highlight?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  shading?: {
+    fill?: string;
+    color?: string;
+    val?: string;
+  };
+};
+
+export type ParagraphTextStyleInput = {
+  alignment?: "left" | "center" | "right" | "justify";
+  indentation?: {
+    left?: number;
+    right?: number;
+    firstLine?: number;
+    hanging?: number;
+  };
+  spacing?: {
+    before?: number;
+    after?: number;
+    line?: number;
+    lineRule?: string;
+  };
+  shading?: {
+    fill?: string;
+    color?: string;
+    pattern?: string;
+  };
+};
+
+export type TextStyleInput = TextTargetQueryInput & {
+  inline?: InlineTextStyleInput;
+  paragraph?: ParagraphTextStyleInput;
+  paragraphStyleId?: string;
+};
+
+type TextMatchCandidate = {
+  index: number;
+  ref?: string;
+  nodeId?: string;
+  nodeType?: string;
+  within?: {
+    nodeId?: string;
+    nodeType?: string;
+  };
+  snippet?: string;
+  blockIds: string[];
+  blocks: Array<{
+    blockId?: string;
+    ref?: string;
+    nodeType?: string;
+    range?: unknown;
+    text: string;
+  }>;
+};
 
 /**
  * 【新增】单元格写入输入类型
@@ -235,6 +324,321 @@ function previewText(text: string): string {
     : text;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function hasKeys(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length > 0;
+}
+
+function getMatchAddress(item: unknown): Record<string, unknown> {
+  return isRecord(item) && isRecord(item.address) ? item.address : {};
+}
+
+function getMatchBlocks(item: unknown): Array<Record<string, unknown>> {
+  return isRecord(item) && Array.isArray(item.blocks)
+    ? item.blocks.filter(isRecord)
+    : [];
+}
+
+function getMatchRef(item: unknown): string | undefined {
+  if (!isRecord(item)) return undefined;
+  if (isRecord(item.handle) && typeof item.handle.ref === "string") {
+    return item.handle.ref;
+  }
+  return typeof item.ref === "string" ? item.ref : undefined;
+}
+
+function getMatchTarget(item: unknown): unknown {
+  return isRecord(item) ? item.target : undefined;
+}
+
+function summarizeMatch(item: unknown, index: number): TextMatchCandidate {
+  const address = getMatchAddress(item);
+  const blocks = getMatchBlocks(item);
+  return {
+    index,
+    ref: getMatchRef(item),
+    nodeId: typeof address.nodeId === "string" ? address.nodeId : undefined,
+    nodeType:
+      typeof address.nodeType === "string" ? address.nodeType : undefined,
+    within: getMatchWithin(item),
+    snippet: isRecord(item)
+      ? safePreview(item.snippet ?? item.text ?? item.content)
+      : "",
+    blockIds: blocks
+      .map((block) => block.blockId)
+      .filter((value): value is string => typeof value === "string"),
+    blocks: blocks.map((block) => ({
+      blockId: typeof block.blockId === "string" ? block.blockId : undefined,
+      ref: typeof block.ref === "string" ? block.ref : undefined,
+      nodeType: typeof block.nodeType === "string" ? block.nodeType : undefined,
+      range: block.range,
+      text: safePreview(block.text),
+    })),
+  };
+}
+
+function safePreview(value: unknown, limit = 120): string {
+  const text = normalizeText(value);
+  return text.length > limit ? text.slice(0, limit) : text;
+}
+
+function buildTextMatchSelect(
+  query: TextTargetQueryInput,
+): Record<string, unknown> {
+  return {
+    type: "text",
+    pattern: query.pattern,
+    ...(query.mode ? { mode: query.mode } : {}),
+    ...(query.caseSensitive != null
+      ? { caseSensitive: query.caseSensitive }
+      : {}),
+  };
+}
+
+function annotateWithinMatch(
+  item: unknown,
+  within: { kind: "block"; nodeType: string; nodeId: string },
+): unknown {
+  return isRecord(item) ? { ...item, __queryWithin: within } : item;
+}
+
+async function runTextMatch(
+  doc: any,
+  query: TextTargetQueryInput,
+  within?: { kind: "block"; nodeType: string; nodeId: string },
+): Promise<unknown[]> {
+  const result = await doc.query.match({
+    select: {
+      ...buildTextMatchSelect(query),
+    },
+    ...(within ? { within } : {}),
+    require: "any",
+  });
+  const items: unknown[] = Array.isArray(result?.items) ? result.items : [];
+  return within
+    ? items.map((item) => annotateWithinMatch(item, within))
+    : items;
+}
+
+function isTextHandleRef(value: string | undefined): boolean {
+  return Boolean(value && value.startsWith("text:"));
+}
+
+function getWithinNodeIds(query: TextTargetQueryInput): string[] {
+  const ids = [
+    query.withinNodeId,
+    query.nodeId,
+    query.blockId,
+    isTextHandleRef(query.ref) ? undefined : query.ref,
+  ].filter((value): value is string => Boolean(value));
+  return Array.from(new Set(ids));
+}
+
+function getWithinNodeTypes(query: TextTargetQueryInput): string[] {
+  if (query.withinNodeType) return [query.withinNodeType];
+  if (query.nodeType) return [query.nodeType];
+  return ["paragraph", "heading", "listItem", "tableCell"];
+}
+
+function matchIdentity(item: unknown): string {
+  if (!isRecord(item)) return JSON.stringify(item);
+  const ref = getMatchRef(item);
+  const within = getMatchWithin(item);
+  if (ref) return [within?.nodeId, within?.nodeType, ref].join("|");
+  const address = getMatchAddress(item);
+  const blocks = getMatchBlocks(item)
+    .map(
+      (block) => `${block.blockId ?? ""}:${JSON.stringify(block.range ?? {})}`,
+    )
+    .join("|");
+  return [
+    within?.nodeId,
+    within?.nodeType,
+    address.nodeId,
+    address.nodeType,
+    item.snippet,
+    item.text,
+    item.content,
+    blocks,
+  ].join("|");
+}
+
+async function queryTextMatches(
+  doc: any,
+  query: TextTargetQueryInput,
+): Promise<unknown[]> {
+  const items = await runTextMatch(doc, query);
+  const seen = new Set(items.map(matchIdentity));
+
+  const scopedItems: unknown[] = [];
+  for (const nodeId of getWithinNodeIds(query)) {
+    for (const nodeType of getWithinNodeTypes(query)) {
+      try {
+        const matches = await runTextMatch(doc, query, {
+          kind: "block",
+          nodeType,
+          nodeId,
+        });
+        for (const item of matches) {
+          const key = matchIdentity(item);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          scopedItems.push(item);
+        }
+      } catch {
+        // A nodeId can be a paragraph, table cell, or search ref; unsupported
+        // within combinations are ignored and the normal match result remains.
+      }
+    }
+  }
+
+  return [...items, ...scopedItems];
+}
+
+function filterTextMatches(
+  items: unknown[],
+  query: TextTargetQueryInput,
+): Array<{ item: unknown; index: number; candidate: TextMatchCandidate }> {
+  const filtered = items
+    .map((item, index) => ({
+      item,
+      index,
+      candidate: summarizeMatch(item, index),
+    }))
+    .filter(({ item, candidate }) => {
+      const within = getMatchWithin(item);
+      if (
+        query.nodeId &&
+        candidate.nodeId !== query.nodeId &&
+        !candidate.blockIds.includes(query.nodeId) &&
+        within?.nodeId !== query.nodeId
+      ) {
+        return false;
+      }
+      if (
+        query.blockId &&
+        candidate.nodeId !== query.blockId &&
+        !candidate.blockIds.includes(query.blockId) &&
+        within?.nodeId !== query.blockId
+      ) {
+        return false;
+      }
+      if (
+        query.ref &&
+        candidate.ref !== query.ref &&
+        within?.nodeId !== query.ref
+      ) {
+        return false;
+      }
+      if (query.withinNodeId && within?.nodeId !== query.withinNodeId) {
+        return false;
+      }
+      if (query.withinNodeType && within?.nodeType !== query.withinNodeType) {
+        return false;
+      }
+      return true;
+    });
+
+  if (query.all) return filtered;
+  const index = query.matchIndex ?? 0;
+  return filtered[index] ? [filtered[index]] : [];
+}
+
+function getMatchWithin(
+  item: unknown,
+): { nodeId?: string; nodeType?: string } | undefined {
+  if (!isRecord(item) || !isRecord(item.__queryWithin)) return undefined;
+  const within = item.__queryWithin;
+  return {
+    nodeId: typeof within.nodeId === "string" ? within.nodeId : undefined,
+    nodeType: typeof within.nodeType === "string" ? within.nodeType : undefined,
+  };
+}
+
+function paragraphTargetFromMatch(item: unknown): {
+  kind: "block";
+  nodeType: "paragraph" | "heading" | "listItem";
+  nodeId: string;
+} | null {
+  const address = getMatchAddress(item);
+  const nodeId = address.nodeId;
+  const nodeType = address.nodeType;
+  if (
+    typeof nodeId === "string" &&
+    (nodeType === "paragraph" ||
+      nodeType === "heading" ||
+      nodeType === "listItem")
+  ) {
+    return { kind: "block", nodeType, nodeId };
+  }
+  return null;
+}
+
+function extractNodeStyle(nodeResult: unknown): unknown {
+  if (!isRecord(nodeResult)) return null;
+  const node = isRecord(nodeResult.node) ? nodeResult.node : nodeResult;
+  return {
+    attrs: node.attrs,
+    paragraph: isRecord(node.paragraph)
+      ? {
+          attrs: node.paragraph.attrs,
+          style: node.paragraph.style,
+          paragraphStyle: node.paragraph.paragraphStyle,
+          properties: node.paragraph.properties,
+        }
+      : undefined,
+    type: node.type ?? node.nodeType,
+  };
+}
+
+function summarizeRunStyle(run: unknown): unknown {
+  if (!isRecord(run)) return null;
+  const source = isRecord(run.run) ? run.run : run;
+  const styles = isRecord(source.styles) ? source.styles : {};
+  const direct = isRecord(styles.direct) ? styles.direct : {};
+  const effective = isRecord(styles.effective) ? styles.effective : {};
+  return {
+    text: safePreview(source.text, 40),
+    range: source.range,
+    ref: source.ref,
+    styles: source.styles,
+    direct: styles.direct,
+    effective: styles.effective,
+    bold: effective.bold ?? direct.bold ?? source.bold ?? source.effectiveBold,
+    italic:
+      effective.italic ??
+      direct.italic ??
+      source.italic ??
+      source.effectiveItalic,
+    underline:
+      effective.underline ??
+      direct.underline ??
+      source.underline ??
+      source.effectiveUnderline,
+    strike:
+      effective.strike ??
+      direct.strike ??
+      source.strike ??
+      source.effectiveStrike,
+    color: styles.color ?? source.color ?? source.effectiveColor,
+    highlight:
+      styles.highlight ?? source.highlight ?? source.effectiveHighlight,
+    fontSize:
+      styles.fontSize ??
+      styles.fontSizePt ??
+      source.fontSize ??
+      source.fontSizePt ??
+      source.effectiveFontSize,
+    fontSizePt: styles.fontSizePt ?? source.fontSizePt,
+    fontFamily:
+      styles.fontFamily ?? source.fontFamily ?? source.effectiveFontFamily,
+    shading: styles.shading ?? source.shading ?? source.effectiveShading,
+  };
+}
+
 function extractInlineText(node: unknown): string {
   if (!node || typeof node !== "object") return "";
 
@@ -277,7 +681,7 @@ async function getTableCells(
 
 async function readCellFullTextByRef(doc: any, ref: string): Promise<string> {
   const data = await doc.getNodeById({ id: ref });
-  //测试
+  //#region 测试
   //tablestyle的获取
   //加到文档末尾
   // await doc.insert({ ref: "cell-auto-3ca8129e", value: "测试", type: "text" });
@@ -302,7 +706,20 @@ async function readCellFullTextByRef(doc: any, ref: string): Promise<string> {
   //     },
   //   ],
   // });
-
+  // const temp = await doc.query.match({
+  //   select: {
+  //     type: "text",
+  //     pattern: "学 院 名 称",
+  //   },
+  //   within: {
+  //     kind: "block",
+  //     nodeType: "tableCell", // 或 heading/listItem/tableCell 等
+  //     nodeId: ref,
+  //   },
+  //   require: "first",
+  // });
+  // console.log(temp);
+  // #endregion
   return extractNodeText(data);
 }
 
@@ -351,11 +768,11 @@ async function getBlocks(
     offset,
     limit,
   } as Record<string, unknown>);
-  return (((result as Record<string, unknown>).blocks || []) as Array<{
+  return ((result as Record<string, unknown>).blocks || []) as Array<{
     nodeId: string;
     nodeType?: string;
     type?: string;
-  }>);
+  }>;
 }
 
 async function readBlockFullTextByRef(doc: any, ref: string): Promise<string> {
@@ -652,6 +1069,191 @@ export async function insertTextAtBlockOffset(
 }
 
 // 多单元格写入只是对单次 setText SDK 封装的循环包装；权限和审批逻辑放在 agentTools。
+export async function findTextTargets(
+  docId: string,
+  query: TextTargetQueryInput,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const items = await queryTextMatches(doc, query);
+  const filtered = filterTextMatches(items, { ...query, all: true });
+
+  return JSON.stringify(
+    {
+      pattern: query.pattern,
+      filters: {
+        mode: query.mode,
+        caseSensitive: query.caseSensitive,
+        nodeId: query.nodeId,
+        nodeType: query.nodeType,
+        blockId: query.blockId,
+        ref: query.ref,
+        withinNodeId: query.withinNodeId,
+        withinNodeType: query.withinNodeType,
+      },
+      totalMatches: items.length,
+      count: filtered.length,
+      targets: filtered.slice(0, 30).map(({ candidate }) => candidate),
+      truncated: filtered.length > 30,
+    },
+    null,
+    2,
+  );
+}
+
+export async function readTextStyle(
+  docId: string,
+  query: TextTargetQueryInput,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const items = await queryTextMatches(doc, query);
+  const selected = filterTextMatches(items, query);
+
+  const targets = await Promise.all(
+    selected.map(async ({ item, candidate }) => {
+      const nodeStyle = candidate.nodeId
+        ? extractNodeStyle(await doc.getNodeById({ id: candidate.nodeId }))
+        : null;
+      const blocks = getMatchBlocks(item).map((block) => ({
+        blockId: block.blockId,
+        ref: block.ref,
+        nodeType: block.nodeType,
+        paragraphStyle: block.paragraphStyle,
+        range: block.range,
+        text: safePreview(block.text, 120),
+        runs: Array.isArray(block.runs)
+          ? block.runs.slice(0, 20).map(summarizeRunStyle)
+          : [],
+      }));
+      return {
+        ...candidate,
+        nodeStyle,
+        blocks,
+      };
+    }),
+  );
+
+  return JSON.stringify(
+    {
+      pattern: query.pattern,
+      filters: {
+        mode: query.mode,
+        caseSensitive: query.caseSensitive,
+        nodeId: query.nodeId,
+        nodeType: query.nodeType,
+        blockId: query.blockId,
+        ref: query.ref,
+        withinNodeId: query.withinNodeId,
+        withinNodeType: query.withinNodeType,
+        matchIndex: query.matchIndex,
+        all: query.all,
+      },
+      totalMatches: items.length,
+      count: targets.length,
+      targets,
+    },
+    null,
+    2,
+  );
+}
+
+export async function applyTextStyle(
+  docId: string,
+  input: TextStyleInput,
+  options?: MutationApplyOptions,
+): Promise<string> {
+  const doc = await getSession(docId);
+  const items = await queryTextMatches(doc, input);
+  const selected = filterTextMatches(items, input);
+  if (!selected.length) {
+    return JSON.stringify(
+      {
+        success: false,
+        error: "text target not found",
+        pattern: input.pattern,
+        totalMatches: items.length,
+      },
+      null,
+      2,
+    );
+  }
+
+  const applied: string[] = [];
+  const inline = input.inline;
+  const paragraph = input.paragraph;
+
+  for (const { item } of selected) {
+    const target = getMatchTarget(item);
+    if (hasKeys(inline)) {
+      if (!target)
+        throw new Error("匹配结果缺少 selection target，无法设置文字样式");
+      await doc.format.apply({
+        target: target as any,
+        inline,
+        ...(options?.changeMode ? { changeMode: options.changeMode } : {}),
+      });
+      applied.push("inline");
+    }
+
+    if (hasKeys(paragraph) || input.paragraphStyleId) {
+      const paragraphTarget = paragraphTargetFromMatch(item);
+      if (!paragraphTarget) {
+        throw new Error(
+          "段落样式需要 paragraph/heading/listItem 的 nodeId target",
+        );
+      }
+
+      if (paragraph?.alignment) {
+        await doc.format.paragraph.setAlignment({
+          target: paragraphTarget,
+          alignment: paragraph.alignment,
+        });
+        applied.push("paragraph.alignment");
+      }
+      if (hasKeys(paragraph?.indentation)) {
+        await doc.format.paragraph.setIndentation({
+          target: paragraphTarget,
+          ...paragraph?.indentation,
+        });
+        applied.push("paragraph.indentation");
+      }
+      if (hasKeys(paragraph?.spacing)) {
+        await doc.format.paragraph.setSpacing({
+          target: paragraphTarget,
+          ...paragraph?.spacing,
+        });
+        applied.push("paragraph.spacing");
+      }
+      if (hasKeys(paragraph?.shading)) {
+        await doc.format.paragraph.setShading({
+          target: paragraphTarget,
+          ...paragraph?.shading,
+        });
+        applied.push("paragraph.shading");
+      }
+      if (input.paragraphStyleId) {
+        await doc.styles.paragraph.setStyle({
+          target: paragraphTarget,
+          styleId: input.paragraphStyleId,
+        });
+        applied.push("paragraph.style");
+      }
+    }
+  }
+
+  return JSON.stringify(
+    {
+      success: true,
+      pattern: input.pattern,
+      totalMatches: items.length,
+      styledCount: selected.length,
+      applied: Array.from(new Set(applied)),
+      targets: selected.map(({ candidate }) => candidate),
+    },
+    null,
+    2,
+  );
+}
+
 export async function writeCellsText(
   docId: string,
   cells: CellWriteInput[],

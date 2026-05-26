@@ -21,6 +21,9 @@ export const applyTableFormat = formatOperations.applyTableFormat;
 export const inspectTextBlocks = formatOperations.inspectTextBlocks;
 export const readTextBlock = formatOperations.readTextBlock;
 export const insertTextAtBlockOffset = formatOperations.insertTextAtBlockOffset;
+export const findTextTargets = formatOperations.findTextTargets;
+export const readTextStyle = formatOperations.readTextStyle;
+export const applyTextStyle = formatOperations.applyTextStyle;
 /**
  * 【新增】单元格批量写入函数
  * 
@@ -58,6 +61,9 @@ export default {
   inspectTextBlocks,
   readTextBlock,
   insertTextAtBlockOffset,
+  findTextTargets,
+  readTextStyle,
+  applyTextStyle,
   writeCellsText,
   verifyCells,
 };

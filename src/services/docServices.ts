@@ -42,6 +42,212 @@ function sha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+const DOCX_MIME =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+const crcTable = new Uint32Array(256).map((_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit++) {
+    crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return crc >>> 0;
+});
+
+function crc32(buffer: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipDateTime(date = new Date()): { time: number; date: number } {
+  const time =
+    (date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1);
+  const dosDate =
+    ((date.getFullYear() - 1980) << 9) |
+    ((date.getMonth() + 1) << 5) |
+    date.getDate();
+  return { time, date: dosDate };
+}
+
+function createZip(entries: Array<{ name: string; data: Buffer }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+  const { time, date } = zipDateTime();
+
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const data = entry.data;
+    const crc = crc32(data);
+
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(0, 28);
+    localParts.push(local, name, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(time, 12);
+    central.writeUInt16LE(date, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+
+    offset += local.length + name.length + data.length;
+  }
+
+  const centralDir = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDir.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, centralDir, eocd]);
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildDocxBuffer(paragraphs: string[]): Buffer {
+  const now = new Date().toISOString();
+  const body = paragraphs.length ? paragraphs : [""];
+  const paragraphXml = body
+    .map(
+      (text) =>
+        `<w:p><w:r><w:t xml:space="preserve">${xmlEscape(text)}</w:t></w:r></w:p>`,
+    )
+    .join("");
+
+  return createZip([
+    {
+      name: "[Content_Types].xml",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`,
+        "utf8",
+      ),
+    },
+    {
+      name: "_rels/.rels",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`,
+        "utf8",
+      ),
+    },
+    {
+      name: "word/_rels/document.xml.rels",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>`,
+        "utf8",
+      ),
+    },
+    {
+      name: "word/document.xml",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphXml}
+    <w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>
+  </w:body>
+</w:document>`,
+        "utf8",
+      ),
+    },
+    {
+      name: "docProps/core.xml",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>DocAgent</dc:creator>
+  <cp:lastModifiedBy>DocAgent</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${now}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">${now}</dcterms:modified>
+</cp:coreProperties>`,
+        "utf8",
+      ),
+    },
+    {
+      name: "docProps/app.xml",
+      data: Buffer.from(
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>DocAgent</Application>
+</Properties>`,
+        "utf8",
+      ),
+    },
+  ]);
+}
+
+export async function createBlankDocument(options: {
+  originalName?: string;
+  title?: string;
+  paragraphs?: string[];
+}): Promise<DocumentMetadata> {
+  const originalName = (options.originalName || "新建文档.docx").trim();
+  const safeName = originalName.toLowerCase().endsWith(".docx")
+    ? originalName
+    : `${originalName}.docx`;
+  const paragraphs = [
+    ...(options.title ? [options.title] : []),
+    ...(options.paragraphs?.length ? options.paragraphs : [""]),
+  ];
+  const buffer = buildDocxBuffer(paragraphs);
+  return saveDocument({
+    originalname: safeName,
+    buffer,
+    size: buffer.byteLength,
+    mimetype: DOCX_MIME,
+  });
+}
+
 async function writeMetadata(metadata: DocumentMetadata): Promise<void> {
   await fs.writeFile(
     path.join(UPLOAD_DIR, `${metadata.id}.json`),

@@ -20,7 +20,7 @@
  */
 
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { streamText, stepCountIs } from "ai";
+import { isLoopFinished, streamText } from "ai";
 import {
   addEvent,
   getRun,
@@ -57,7 +57,10 @@ function runHasWriteOperations(events: AgentEvent[]): boolean {
     (event) =>
       event.type === "tool.finished" &&
       (event.payload.name === "write_cells_text" ||
-        event.payload.name === "replace_text") &&
+        event.payload.name === "replace_text" ||
+        event.payload.name === "apply_table_format" ||
+        event.payload.name === "insert_text_at_block_offset" ||
+        event.payload.name === "apply_text_style") &&
       event.payload.status === "ok",
   );
 }
@@ -81,6 +84,7 @@ const SYSTEM_PROMPT = [
   "写入前优先 dry_run_write_cells；写入后必须 verify_cells。",
   "如果写入或替换需要用户审批，工具会暂停到审批完成；审批结果返回后再继续判断和总结。",
   "工具 detail 可能很长，最终回答只总结关键结果。",
+  "When the task is fully complete, call the finalAnswer tool exactly once as a signal only. Do not put the final answer in tool arguments or JSON. After finalAnswer returns, produce the final answer as normal Chinese text so it streams through textStream.",
 ].join("\n");
 
 /**
@@ -97,6 +101,13 @@ function buildDocumentContext(run: AgentRun): string {
       return `${index + 1}. ${doc.name}${active}`;
     })
     .join("\n");
+
+  if (!documents) {
+    return [
+      "当前没有已打开文档。",
+      "如果用户要新建文档，先调用 create_document；新建成功后再继续编辑该文档。",
+    ].join("\n");
+  }
 
   return [
     "当前可操作文档：",
@@ -268,10 +279,21 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
       // stepCountIs(8) 表示最多执行 8 个"步骤"
       // 每个步骤 = LLM 生成一次响应（可能包含多个工具调用）
       // 这是防止 Agent 无限循环的安全机制
-      stopWhen: stepCountIs(8),
-
       // temperature: 控制生成的随机性
       // 0.2 表示较低的随机性，适合需要精确操作的任务
+      stopWhen: isLoopFinished(),
+      prepareStep: ({ steps }) => {
+        const lastStep = steps[steps.length - 1];
+        const isAfterFinalAnswer =
+          lastStep?.toolCalls?.some((toolCall) => toolCall.toolName === "finalAnswer") ?? false;
+
+        if (!isAfterFinalAnswer) return undefined;
+
+        return {
+          toolChoice: "none",
+          system: `${fullSystemPrompt}\n\nYou already called finalAnswer. Now output the final answer as normal concise Chinese text. Do not call tools. Do not output JSON.`,
+        };
+      },
       temperature: 0.2,
 
       // experimental_onStepStart: 每步开始时的回调

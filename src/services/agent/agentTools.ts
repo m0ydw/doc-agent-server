@@ -1,6 +1,8 @@
 import { tool } from "ai";
 import { z } from "zod";
 import * as editor from "../editor";
+import { createBlankDocument } from "../docServices";
+import { registerDocument } from "../fileRegistry";
 import {
   addPendingApproval,
   waitForApprovalResult,
@@ -28,6 +30,8 @@ type ToolResult = {
   summary: string;
   detail?: unknown;
 };
+
+const finalAnswerSchema = z.object({});
 
 function mutationOptionsForPermission(permissionMode: AgentRun["permissionMode"]) {
   return permissionMode === "auto_tracked"
@@ -116,6 +120,90 @@ const tableFormatSchema = z.object({
       right: z.number(),
     })
     .optional(),
+});
+
+const underlineSchema = z.union([
+  z.boolean(),
+  z.object({
+    style: z.string().optional(),
+    color: z.string().optional(),
+    themeColor: z.string().optional(),
+  }),
+]);
+
+const inlineTextStyleSchema = z.object({
+  bold: z.boolean().optional(),
+  italic: z.boolean().optional(),
+  underline: underlineSchema.optional(),
+  strike: z.boolean().optional(),
+  color: z.string().optional().describe("Text color, for example 000000 or #000000."),
+  highlight: z.string().optional().describe("Highlight color."),
+  fontSize: z.number().optional().describe("Font size in points."),
+  fontFamily: z.string().optional(),
+  shading: z
+    .object({
+      fill: z.string().optional(),
+      color: z.string().optional(),
+      val: z.string().optional(),
+    })
+    .optional(),
+});
+
+const paragraphTextStyleSchema = z.object({
+  alignment: z.enum(["left", "center", "right", "justify"]).optional(),
+  indentation: z
+    .object({
+      left: z.number().optional(),
+      right: z.number().optional(),
+      firstLine: z.number().optional(),
+      hanging: z.number().optional(),
+    })
+    .optional(),
+  spacing: z
+    .object({
+      before: z.number().optional(),
+      after: z.number().optional(),
+      line: z.number().optional(),
+      lineRule: z.string().optional(),
+    })
+    .optional(),
+  shading: z
+    .object({
+      fill: z.string().optional(),
+      color: z.string().optional(),
+      pattern: z.string().optional(),
+    })
+    .optional(),
+});
+
+const textTargetSchema = z.object({
+  documentName: z.string().optional(),
+  pattern: z.string().min(1).describe("Text to search before styling."),
+  mode: z.enum(["contains", "regex"]).optional(),
+  caseSensitive: z.boolean().optional(),
+  nodeId: z.string().optional().describe("Optional block nodeId to narrow the match."),
+  nodeType: z.string().optional().describe("Optional node type for scoped matching, for example tableCell or paragraph."),
+  blockId: z.string().optional().describe("Optional blockId returned by find_text_targets."),
+  ref: z.string().optional().describe("Optional search ref returned by find_text_targets."),
+  withinNodeId: z.string().optional().describe("Optional container nodeId used with doc.query.match within."),
+  withinNodeType: z.string().optional().describe("Optional container nodeType used with within, for example tableCell."),
+  matchIndex: z.number().int().min(0).optional().describe("0-based index after filters; default 0."),
+  all: z.boolean().optional().describe("true applies to every filtered match."),
+});
+
+const textStyleSchema = textTargetSchema.extend({
+  inline: inlineTextStyleSchema.optional(),
+  paragraph: paragraphTextStyleSchema.optional(),
+  paragraphStyleId: z.string().optional(),
+});
+
+const createDocumentSchema = z.object({
+  documentName: z
+    .string()
+    .optional()
+    .describe("New DOCX name. .docx is appended if missing."),
+  title: z.string().optional(),
+  paragraphs: z.array(z.string()).optional(),
 });
 
 function parseJsonResult(value: string): unknown {
@@ -208,6 +296,62 @@ async function withToolEvents<T extends ToolResult>(
 
 export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
   return {
+    finalAnswer: tool({
+      description:
+        "Call this exactly once when all required tool work is complete. This is only a signal; do not include the final answer here. After this tool returns, write the final answer as normal text.",
+      inputSchema: finalAnswerSchema,
+      execute: async () =>
+        withToolEvents(emit, "finalAnswer", {}, async () => {
+          return {
+            status: "ok",
+            summary: "Ready for final text response.",
+          };
+        }),
+    }),
+
+    create_document: tool({
+      description:
+        "新建一个 DOCX，并注册到当前系统；成功后前端会自动打开。可给 documentName/title/paragraphs。",
+      inputSchema: createDocumentSchema,
+      execute: async ({ documentName, title, paragraphs }) =>
+        withToolEvents(
+          emit,
+          "create_document",
+          { documentName, title, paragraphCount: paragraphs?.length ?? 0 },
+          async () => {
+            const metadata = await createBlankDocument({
+              originalName: documentName,
+              title,
+              paragraphs,
+            });
+            registerDocument(metadata);
+            run.documents.forEach((doc) => {
+              doc.active = false;
+            });
+            run.documents.push({
+              id: metadata.id,
+              name: metadata.originalName,
+              active: true,
+            });
+            run.activeDocId = metadata.id;
+
+            return {
+              status: "ok",
+              summary: `已新建文档《${metadata.originalName}》。`,
+              detail: {
+                document: {
+                  id: metadata.id,
+                  name: metadata.originalName,
+                  originalName: metadata.originalName,
+                  size: metadata.size,
+                  uploadedAt: metadata.uploadedAt,
+                },
+              },
+            };
+          },
+        ),
+    }),
+
     get_text: tool({
       description:
         "读取某个 DOCX 文档全文。documentName 不填时读取当前文档。",
@@ -503,6 +647,101 @@ export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             detail: result,
           };
         }),
+    }),
+
+    find_text_targets: tool({
+      description:
+        "搜索文本并返回可用于设置样式的候选目标。用 nodeId/blockId/ref 缩小到表格单元格内文本或某段文本。",
+      inputSchema: textTargetSchema,
+      execute: async ({ documentName, ...query }) =>
+        withToolEvents(
+          emit,
+          "find_text_targets",
+          { documentName, query },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.findTextTargets(doc.id, query),
+            );
+            return {
+              status: "ok",
+              summary: `已在 ${doc.name} 中定位文本样式目标：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
+    }),
+
+    read_text_style: tool({
+      description:
+        "读取文本/段落样式。先按 pattern 搜索，可用 nodeId/blockId/ref/matchIndex/all 精确筛选；返回 node attrs、paragraphStyle、runs 常见格式，方便格式刷。",
+      inputSchema: textTargetSchema,
+      execute: async ({ documentName, ...query }) =>
+        withToolEvents(
+          emit,
+          "read_text_style",
+          { documentName, query },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.readTextStyle(doc.id, query),
+            );
+            return {
+              status: "ok",
+              summary: `已读取 ${doc.name} 的文本样式：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
+    }),
+
+    apply_text_style: tool({
+      description:
+        "先按 pattern 搜索，再用 nodeId/blockId/ref/matchIndex/all 精确筛选，设置文字/段落样式。只应用传入的样式字段；段落样式必须有 paragraph/heading/listItem nodeId。",
+      inputSchema: textStyleSchema,
+      execute: async ({ documentName, ...styleInput }) =>
+        withToolEvents(
+          emit,
+          "apply_text_style",
+          { documentName, styleInput, permissionMode: run.permissionMode },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            if (run.permissionMode === "read_only") {
+              return {
+                status: "blocked",
+                summary: "当前是 read_only 模式，不能修改文本样式。",
+                detail: styleInput,
+              };
+            }
+
+            const hasInline = Boolean(
+              styleInput.inline && Object.keys(styleInput.inline).length,
+            );
+            const hasParagraph = Boolean(
+              styleInput.paragraph && Object.keys(styleInput.paragraph).length,
+            );
+            if (!hasInline && !hasParagraph && !styleInput.paragraphStyleId) {
+              return {
+                status: "blocked",
+                summary: "没有传入任何样式字段，未修改文档。",
+                detail: styleInput,
+              };
+            }
+
+            const result = parseJsonResult(
+              await editor.applyTextStyle(
+                doc.id,
+                styleInput,
+                mutationOptionsForPermission(run.permissionMode),
+              ),
+            );
+            return {
+              status: "ok",
+              summary: `已设置 ${doc.name} 的文本样式：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
     }),
 
     insert_text_at_block_offset: tool({
