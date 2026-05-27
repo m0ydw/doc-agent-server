@@ -1,4 +1,5 @@
 import * as sessionManager from "../../services/session";
+import { dispatchSuperDocTool } from "@superdoc-dev/sdk";
 
 async function getSession(docId: string) {
   const result = await sessionManager.createOrUseSession(docId);
@@ -1310,6 +1311,59 @@ async function resolveInlineTargets(
   return target ? [{ scope: "block-fallback", target }] : [];
 }
 
+async function applyInlineStyleWithSuperDocTools(
+  doc: any,
+  item: unknown,
+  inline: InlineTextStyleInput,
+  inlineTargets: ResolvedInlineTarget[],
+  options?: MutationApplyOptions,
+): Promise<"superdoc_format" | "superdoc_mutations" | "direct_fallback"> {
+  const blockTargets = inlineTargets.filter(
+    (target) => target.blockId && target.scope !== "match",
+  );
+
+  if (blockTargets.length) {
+    await dispatchSuperDocTool(doc, "superdoc_mutations", {
+      action: "apply",
+      atomic: true,
+      ...(options?.changeMode ? { changeMode: options.changeMode } : {}),
+      steps: blockTargets.map((target, index) => ({
+        id: `style-${index}`,
+        op: "format.apply",
+        where: {
+          by: "block",
+          nodeType: target.nodeType || "paragraph",
+          nodeId: target.blockId,
+        },
+        args: { inline },
+      })),
+    });
+    return "superdoc_mutations";
+  }
+
+  const ref = getMatchRef(item);
+  if (ref) {
+    await dispatchSuperDocTool(doc, "superdoc_format", {
+      action: "inline",
+      ref,
+      inline,
+      ...(options?.changeMode ? { changeMode: options.changeMode } : {}),
+    });
+    return "superdoc_format";
+  }
+
+  const fallbackTarget = inlineTargets[0]?.target;
+  if (!fallbackTarget) {
+    throw new Error("No selection target was resolved for text style.");
+  }
+  await doc.format.apply({
+    target: fallbackTarget as any,
+    inline,
+    ...(options?.changeMode ? { changeMode: options.changeMode } : {}),
+  });
+  return "direct_fallback";
+}
+
 export async function readTextStyle(
   docId: string,
   query: TextTargetQueryInput,
@@ -1436,11 +1490,13 @@ export async function applyTextStyle(
 
   const applied: string[] = [];
   const styledInlineTargets: ResolvedInlineTarget[] = [];
+  const superDocStyleTools: string[] = [];
   const inline = input.inline;
   const paragraph = input.paragraph;
 
   for (const { item, candidate } of selected) {
     if (hasKeys(inline)) {
+      const inlineStyle = inline as InlineTextStyleInput;
       const inlineTargets = await resolveInlineTargets(
         doc,
         input,
@@ -1451,14 +1507,15 @@ export async function applyTextStyle(
         throw new Error("No selection target was resolved for text style.");
       }
 
-      for (const inlineTarget of inlineTargets) {
-        await doc.format.apply({
-          target: inlineTarget.target as any,
-          inline,
-          ...(options?.changeMode ? { changeMode: options?.changeMode } : {}),
-        });
-        styledInlineTargets.push(inlineTarget);
-      }
+      const superDocStyleTool = await applyInlineStyleWithSuperDocTools(
+        doc,
+        item,
+        inlineStyle,
+        inlineTargets,
+        options,
+      );
+      superDocStyleTools.push(superDocStyleTool);
+      styledInlineTargets.push(...inlineTargets);
       applied.push(`inline.${input.styleScope ?? "block"}`);
     }
 
@@ -1483,21 +1540,24 @@ export async function applyTextStyle(
       }
 
       if (paragraph?.alignment) {
-        await doc.format.paragraph.setAlignment({
+        await dispatchSuperDocTool(doc, "superdoc_format", {
+          action: "set_alignment",
           target: paragraphTarget,
           alignment: paragraph.alignment,
         });
         applied.push("paragraph.alignment");
       }
       if (hasKeys(paragraph?.indentation)) {
-        await doc.format.paragraph.setIndentation({
+        await dispatchSuperDocTool(doc, "superdoc_format", {
+          action: "set_indentation",
           target: paragraphTarget,
           ...paragraph?.indentation,
         });
         applied.push("paragraph.indentation");
       }
       if (hasKeys(paragraph?.spacing)) {
-        await doc.format.paragraph.setSpacing({
+        await dispatchSuperDocTool(doc, "superdoc_format", {
+          action: "set_spacing",
           target: paragraphTarget,
           ...paragraph?.spacing,
         });
@@ -1511,7 +1571,8 @@ export async function applyTextStyle(
         applied.push("paragraph.shading");
       }
       if (input.paragraphStyleId) {
-        await doc.styles.paragraph.setStyle({
+        await dispatchSuperDocTool(doc, "superdoc_format", {
+          action: "set_style",
           target: paragraphTarget,
           styleId: input.paragraphStyleId,
         });
@@ -1528,6 +1589,7 @@ export async function applyTextStyle(
       styledCount: selected.length,
       styleScope: input.styleScope ?? "block",
       styledInlineSelectionCount: styledInlineTargets.length,
+      superDocStyleTools: Array.from(new Set(superDocStyleTools)),
       applied: Array.from(new Set(applied)),
       styledInlineTargets: styledInlineTargets.map(
         ({ scope, blockId, nodeType, textLength }) => ({

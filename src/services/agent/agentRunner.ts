@@ -27,7 +27,7 @@ import {
   setRunStatus,
 } from "./agentSessionManager";
 import { saveSessionDocuments } from "../session";
-import { createAgentTools } from "./agentTools";
+import { createAgentTools, getSuperDocAgentSystemPrompt } from "./agentTools";
 import type { AgentEvent, AgentRun } from "./agentTypes";
 import {
   logAgentStart,
@@ -52,11 +52,22 @@ import {
  */
 type EmitToClient = (event: AgentEvent) => void;
 
+const mutatingSuperDocTools = new Set([
+  "superdoc_edit",
+  "superdoc_format",
+  "superdoc_create",
+  "superdoc_list",
+  "superdoc_comment",
+  "superdoc_track_changes",
+  "superdoc_mutations",
+]);
+
 function runHasWriteOperations(events: AgentEvent[]): boolean {
   return events.some(
     (event) =>
       event.type === "tool.finished" &&
-      (event.payload.name === "write_cells_text" ||
+      (mutatingSuperDocTools.has(String(event.payload.name)) ||
+        event.payload.name === "write_cells_text" ||
         event.payload.name === "replace_text" ||
         event.payload.name === "apply_table_format" ||
         event.payload.name === "insert_text_at_block_offset" ||
@@ -257,7 +268,7 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
     // 创建工具集合
     // createAgentTools 返回一个对象，每个属性是一个工具定义
     // 工具定义包含：description（描述）、inputSchema（参数 schema）、execute（执行函数）
-    const tools = createAgentTools(run, (type, payload) => {
+    const tools = await createAgentTools(run, (type, payload) => {
       emit(runId, type, payload, send);
     });
 
@@ -265,7 +276,8 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
     logToolList(tools as unknown as Record<string, unknown>);
 
     // 构建完整的系统提示词
-    const fullSystemPrompt = `${SYSTEM_PROMPT}\n\n${buildDocumentContext(run)}`;
+    const superDocSystemPrompt = await getSuperDocAgentSystemPrompt();
+    const fullSystemPrompt = `${SYSTEM_PROMPT}\n\n${superDocSystemPrompt}\n\n${buildDocumentContext(run)}`;
 
     // ========== 调试日志：打印 System Prompt 和文档上下文 ==========
     logSystemPrompt(SYSTEM_PROMPT);

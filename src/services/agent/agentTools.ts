@@ -1,6 +1,13 @@
-import { tool } from "ai";
+import { jsonSchema, tool } from "ai";
+import {
+  chooseTools,
+  dispatchSuperDocTool,
+  getSystemPrompt as getSuperDocSystemPrompt,
+  getToolCatalog,
+} from "@superdoc-dev/sdk";
 import { z } from "zod";
 import * as editor from "../editor";
+import * as sessionManager from "../session";
 import { createBlankDocument } from "../docServices";
 import { registerDocument } from "../fileRegistry";
 import {
@@ -30,6 +37,50 @@ type ToolResult = {
   summary: string;
   detail?: unknown;
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+type SuperDocVercelTool = {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+};
+
+type SuperDocCatalogTool = {
+  toolName: string;
+  mutates: boolean;
+};
+
+type SuperDocIntentToolResources = {
+  prompt: string;
+  tools: SuperDocVercelTool[];
+  catalogByName: Map<string, SuperDocCatalogTool>;
+};
+
+let superDocIntentToolResources: Promise<SuperDocIntentToolResources> | null =
+  null;
+
+function getSuperDocIntentToolResources(): Promise<SuperDocIntentToolResources> {
+  superDocIntentToolResources ??= Promise.all([
+    chooseTools({ provider: "vercel" }),
+    getToolCatalog(),
+    getSuperDocSystemPrompt(),
+  ]).then(([selected, catalog, prompt]) => ({
+    prompt,
+    tools: (selected.tools as SuperDocVercelTool[]).filter(
+      (item) => item?.type === "function" && item.function?.name,
+    ),
+    catalogByName: new Map(
+      catalog.tools.map((item) => [item.toolName, item as SuperDocCatalogTool]),
+    ),
+  }));
+  return superDocIntentToolResources;
+}
 
 const finalAnswerSchema = z.object({});
 
@@ -254,6 +305,42 @@ function requireDocument(run: AgentRun, documentName?: string) {
   return doc;
 }
 
+function buildSuperDocToolSchema(schema: Record<string, unknown>) {
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  return {
+    ...(schema as Record<string, unknown>),
+    properties: {
+      documentName: {
+        type: "string",
+        description:
+          "Optional document name or id. Omit to use the active document.",
+      },
+      ...properties,
+    },
+  };
+}
+
+function stripAgentOnlyArgs(input: unknown): Record<string, unknown> {
+  if (!isRecord(input)) return {};
+  const { documentName: _documentName, ...args } = input;
+  return args;
+}
+
+function withPermissionModeArgs(
+  args: Record<string, unknown>,
+  permissionMode: AgentRun["permissionMode"],
+): Record<string, unknown> {
+  if (permissionMode !== "auto_tracked") return args;
+  if ("changeMode" in args) return args;
+  return { ...args, changeMode: "tracked" };
+}
+
+function documentNameFromArgs(input: unknown): string | undefined {
+  return isRecord(input) && typeof input.documentName === "string"
+    ? input.documentName
+    : undefined;
+}
+
 async function withToolEvents<T extends ToolResult>(
   emit: EmitAgentEvent,
   name: string,
@@ -301,8 +388,71 @@ async function withToolEvents<T extends ToolResult>(
   }
 }
 
-export function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
+function createSuperDocIntentTools(
+  run: AgentRun,
+  emit: EmitAgentEvent,
+  resources: SuperDocIntentToolResources,
+) {
+  return Object.fromEntries(
+    resources.tools.map((superDocTool) => {
+      const toolName = superDocTool.function.name;
+      const catalogEntry = resources.catalogByName.get(toolName);
+      const mutates = Boolean(catalogEntry?.mutates);
+
+      return [
+        toolName,
+        tool({
+          description: superDocTool.function.description,
+          inputSchema: jsonSchema(
+            buildSuperDocToolSchema(superDocTool.function.parameters),
+          ),
+          execute: async (input) =>
+            withToolEvents(emit, toolName, input, async () => {
+              const documentName = documentNameFromArgs(input);
+              const targetDoc = requireDocument(run, documentName);
+
+              if (mutates && run.permissionMode === "read_only") {
+                return {
+                  status: "blocked",
+                  summary: "read_only 模式下不能执行会修改文档的 SuperDoc 工具。",
+                  detail: { toolName, input },
+                };
+              }
+
+              const { doc } = await sessionManager.createOrUseSession(
+                targetDoc.id,
+              );
+              const result = await dispatchSuperDocTool(
+                doc,
+                toolName,
+                withPermissionModeArgs(
+                  stripAgentOnlyArgs(input),
+                  run.permissionMode,
+                ),
+              );
+
+              return {
+                status: "ok",
+                summary: `${toolName} completed. ${toSummaryText(result)}`,
+                detail: result,
+              };
+            }),
+        }),
+      ];
+    }),
+  );
+}
+
+export async function getSuperDocAgentSystemPrompt(): Promise<string> {
+  const resources = await getSuperDocIntentToolResources();
+  return resources.prompt;
+}
+
+export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
+  const superDocResources = await getSuperDocIntentToolResources();
+
   return {
+    ...createSuperDocIntentTools(run, emit, superDocResources),
     finalAnswer: tool({
       description:
         "Call this exactly once when all required tool work is complete. This is only a signal; do not include the final answer here. After this tool returns, write the final answer as normal text.",
