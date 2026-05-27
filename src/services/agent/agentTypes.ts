@@ -4,8 +4,10 @@ export type PermissionMode =
   | "auto_tracked"
   | "auto_apply";
 
-export type DeepSeekConfig = {
-  provider: "deepseek";
+export type LlmProvider = "deepseek" | "xiaomimimo";
+
+export type LlmConfig = {
+  provider: LlmProvider;
   apiKey: string;
   baseURL: string;
   model: string;
@@ -22,7 +24,7 @@ export type AgentStartPayload = {
   documents?: AgentDocumentRef[];
   prompt: string;
   permissionMode: PermissionMode;
-  llm: DeepSeekConfig;
+  llm: LlmConfig;
 };
 
 export type AgentEventType =
@@ -91,7 +93,7 @@ export type AgentRun = {
   documents: AgentDocumentRef[];
   prompt: string;
   permissionMode: PermissionMode;
-  llm: DeepSeekConfig;
+  llm: LlmConfig;
   status: AgentRunStatus;
   events: AgentEvent[];
   pendingApprovals: PendingApproval[];

@@ -106,12 +106,6 @@ type TableAddress = {
   nodeId: string;
 };
 
-type BlockAddress = {
-  kind: "block";
-  nodeType: "paragraph";
-  nodeId: string;
-};
-
 export type TableTargetInput = {
   tableIndex?: number;
   tableRef?: string;
@@ -247,6 +241,23 @@ export type TextStyleInput = TextTargetQueryInput & {
   inline?: InlineTextStyleInput;
   paragraph?: ParagraphTextStyleInput;
   paragraphStyleId?: string;
+  styleScope?: "match" | "block" | "container";
+};
+
+type TextStyleScope = NonNullable<TextStyleInput["styleScope"]>;
+
+type TextSelectionTarget = {
+  kind: "selection";
+  start: { kind: "text"; blockId: string; offset: number };
+  end: { kind: "text"; blockId: string; offset: number };
+};
+
+type ResolvedInlineTarget = {
+  scope: TextStyleScope | "container-fallback" | "block-fallback";
+  blockId?: string;
+  nodeType?: string;
+  textLength?: number;
+  target: unknown;
 };
 
 type TextMatchCandidate = {
@@ -668,6 +679,123 @@ function extractNodeText(nodeResult: unknown): string {
 
   return normalizeText(extractInlineText(node));
 }
+
+function extractNodeRawText(nodeResult: unknown): string {
+  const result = nodeResult as { node?: Record<string, unknown> } | null;
+  const node = result?.node;
+  if (!node) return "";
+
+  const paragraph = node.paragraph as { inlines?: unknown[] } | undefined;
+  if (Array.isArray(paragraph?.inlines)) {
+    return paragraph.inlines.map(extractInlineText).join("");
+  }
+
+  return extractInlineText(node);
+}
+
+function getRecordNodeId(value: Record<string, unknown>): string | undefined {
+  for (const key of ["nodeId", "id", "blockId"]) {
+    if (typeof value[key] === "string") return value[key] as string;
+  }
+  return undefined;
+}
+
+function getRecordNodeType(value: Record<string, unknown>): string | undefined {
+  const nodeType = value.nodeType ?? value.type;
+  if (typeof nodeType === "string") return nodeType;
+  if (isRecord(value.paragraph)) return "paragraph";
+  return undefined;
+}
+
+function isTextBlockNodeType(nodeType: string | undefined): boolean {
+  return (
+    nodeType === "paragraph" ||
+    nodeType === "heading" ||
+    nodeType === "listItem"
+  );
+}
+
+function buildBlockSelection(
+  blockId: string,
+  textLength: number,
+): TextSelectionTarget {
+  return {
+    kind: "selection",
+    start: { kind: "text", blockId, offset: 0 },
+    end: { kind: "text", blockId, offset: Math.max(textLength, 0) },
+  };
+}
+
+function collectTextBlocksFromNodeTree(
+  value: unknown,
+  seen = new Set<string>(),
+): Array<{ blockId: string; nodeType?: string; text: string }> {
+  if (!isRecord(value)) return [];
+
+  const node = isRecord(value.node) ? value.node : value;
+  const collected: Array<{ blockId: string; nodeType?: string; text: string }> =
+    [];
+  const nodeId = getRecordNodeId(node);
+  const nodeType = getRecordNodeType(node);
+
+  if (nodeId && isTextBlockNodeType(nodeType) && !seen.has(nodeId)) {
+    const text = extractNodeRawText({ node });
+    seen.add(nodeId);
+    collected.push({ blockId: nodeId, nodeType, text });
+  }
+
+  for (const child of Object.values(node)) {
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        collected.push(...collectTextBlocksFromNodeTree(item, seen));
+      }
+      continue;
+    }
+    if (isRecord(child)) {
+      collected.push(...collectTextBlocksFromNodeTree(child, seen));
+    }
+  }
+
+  return collected;
+}
+
+function styleComparableKey(run: unknown): string {
+  if (!isRecord(run)) return "null";
+  const source = isRecord(run.run) ? run.run : run;
+  if (isRecord(source.styles)) return JSON.stringify(source.styles);
+  const summary = summarizeRunStyle(source);
+  if (!isRecord(summary)) return JSON.stringify(summary);
+  const { text: _text, range: _range, ref: _ref, ...styleOnly } = summary;
+  return JSON.stringify(styleOnly);
+}
+
+function summarizeRunGroups(runs: unknown[]): Array<{
+  count: number;
+  sampleText: string;
+  styles: unknown;
+}> {
+  const groups = new Map<
+    string,
+    { count: number; sampleText: string; styles: unknown }
+  >();
+
+  for (const run of runs) {
+    const key = styleComparableKey(run);
+    const source = isRecord(run) && isRecord(run.run) ? run.run : run;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    groups.set(key, {
+      count: 1,
+      sampleText: isRecord(source) ? safePreview(source.text, 20) : "",
+      styles: isRecord(source) ? source.styles ?? summarizeRunStyle(source) : null,
+    });
+  }
+
+  return Array.from(groups.values());
+}
 //获取某个cells
 async function getTableCells(
   doc: any,
@@ -681,45 +809,6 @@ async function getTableCells(
 
 async function readCellFullTextByRef(doc: any, ref: string): Promise<string> {
   const data = await doc.getNodeById({ id: ref });
-  //#region 测试
-  //tablestyle的获取
-  //加到文档末尾
-  // await doc.insert({ ref: "cell-auto-3ca8129e", value: "测试", type: "text" });
-
-  //// 模式 2：target.kind = "block"
-  // 在某个 block 前/后插入结构化内容
-  // await doc.insert({
-  //   target: {
-  //     kind: "block",
-  //     nodeId: "paragraph-auto-a12b34c",
-  //   },
-  //   position: "after",
-  //   content: [
-  //     {
-  //       type: "paragraph",
-  //       children: [
-  //         {
-  //           type: "text",
-  //           text: "这是新插入的段落",
-  //         },
-  //       ],
-  //     },
-  //   ],
-  // });
-  // const temp = await doc.query.match({
-  //   select: {
-  //     type: "text",
-  //     pattern: "学 院 名 称",
-  //   },
-  //   within: {
-  //     kind: "block",
-  //     nodeType: "tableCell", // 或 heading/listItem/tableCell 等
-  //     nodeId: ref,
-  //   },
-  //   require: "first",
-  // });
-  // console.log(temp);
-  // #endregion
   return extractNodeText(data);
 }
 
@@ -778,6 +867,19 @@ async function getBlocks(
 async function readBlockFullTextByRef(doc: any, ref: string): Promise<string> {
   const data = await doc.getNodeById({ id: ref });
   return extractNodeText(data);
+}
+
+async function readBlockRawTextByRef(doc: any, ref: string): Promise<string> {
+  const data = await doc.getNodeById({ id: ref });
+  return extractNodeRawText(data);
+}
+
+async function readContainerTextBlocks(
+  doc: any,
+  nodeId: string,
+): Promise<Array<{ blockId: string; nodeType?: string; text: string }>> {
+  const data = await doc.getNodeById({ id: nodeId });
+  return collectTextBlocksFromNodeTree(data);
 }
 
 export async function inspectDocumentStructure(docId: string): Promise<string> {
@@ -1100,6 +1202,114 @@ export async function findTextTargets(
   );
 }
 
+async function resolveBlockInlineTargets(
+  doc: any,
+  item: unknown,
+): Promise<ResolvedInlineTarget[]> {
+  const blocks = getMatchBlocks(item);
+  const seen = new Set<string>();
+  const targets: ResolvedInlineTarget[] = [];
+
+  for (const block of blocks) {
+    const blockId = typeof block.blockId === "string" ? block.blockId : "";
+    if (!blockId || seen.has(blockId)) continue;
+    seen.add(blockId);
+
+    let text = "";
+    try {
+      text = await readBlockRawTextByRef(doc, blockId);
+    } catch {
+      text = typeof block.text === "string" ? block.text : "";
+    }
+
+    if (!text && typeof block.text === "string") text = block.text;
+    targets.push({
+      scope: "block",
+      blockId,
+      nodeType: typeof block.nodeType === "string" ? block.nodeType : undefined,
+      textLength: text.length,
+      target: buildBlockSelection(blockId, text.length),
+    });
+  }
+
+  return targets;
+}
+
+function getContainerScopeNodeIds(
+  input: TextStyleInput,
+  item: unknown,
+  candidate: TextMatchCandidate,
+): string[] {
+  const within = getMatchWithin(item);
+  const ids = [
+    input.withinNodeId,
+    within?.nodeId,
+    input.nodeType === "tableCell" ? input.nodeId : undefined,
+    candidate.nodeType === "tableCell" ? candidate.nodeId : undefined,
+    !isTextHandleRef(input.ref) ? input.ref : undefined,
+  ].filter((value): value is string => Boolean(value));
+  return Array.from(new Set(ids));
+}
+
+async function resolveContainerInlineTargets(
+  doc: any,
+  input: TextStyleInput,
+  item: unknown,
+  candidate: TextMatchCandidate,
+): Promise<ResolvedInlineTarget[]> {
+  const seen = new Set<string>();
+  const targets: ResolvedInlineTarget[] = [];
+
+  for (const nodeId of getContainerScopeNodeIds(input, item, candidate)) {
+    try {
+      const blocks = await readContainerTextBlocks(doc, nodeId);
+      for (const block of blocks) {
+        if (!block.blockId || seen.has(block.blockId)) continue;
+        seen.add(block.blockId);
+        targets.push({
+          scope: "container",
+          blockId: block.blockId,
+          nodeType: block.nodeType,
+          textLength: block.text.length,
+          target: buildBlockSelection(block.blockId, block.text.length),
+        });
+      }
+    } catch {
+      // Some refs are text handles or unsupported nodes. Fall back below.
+    }
+  }
+
+  if (targets.length) return targets;
+  const fallback = await resolveBlockInlineTargets(doc, item);
+  return fallback.map((target) => ({
+    ...target,
+    scope: "container-fallback",
+  }));
+}
+
+async function resolveInlineTargets(
+  doc: any,
+  input: TextStyleInput,
+  item: unknown,
+  candidate: TextMatchCandidate,
+): Promise<ResolvedInlineTarget[]> {
+  const styleScope = input.styleScope ?? "block";
+  if (styleScope === "match") {
+    const target = getMatchTarget(item);
+    return target ? [{ scope: "match", target }] : [];
+  }
+
+  if (styleScope === "container") {
+    return resolveContainerInlineTargets(doc, input, item, candidate);
+  }
+
+  const blockTargets = await resolveBlockInlineTargets(doc, item);
+  if (blockTargets.length) return blockTargets;
+
+  const target = getMatchTarget(item);
+  return target ? [{ scope: "block-fallback", target }] : [];
+}
+
 export async function readTextStyle(
   docId: string,
   query: TextTargetQueryInput,
@@ -1113,20 +1323,67 @@ export async function readTextStyle(
       const nodeStyle = candidate.nodeId
         ? extractNodeStyle(await doc.getNodeById({ id: candidate.nodeId }))
         : null;
-      const blocks = getMatchBlocks(item).map((block) => ({
-        blockId: block.blockId,
-        ref: block.ref,
-        nodeType: block.nodeType,
-        paragraphStyle: block.paragraphStyle,
-        range: block.range,
-        text: safePreview(block.text, 120),
-        runs: Array.isArray(block.runs)
-          ? block.runs.slice(0, 20).map(summarizeRunStyle)
-          : [],
-      }));
+      const blocks = await Promise.all(
+        getMatchBlocks(item).map(async (block) => {
+          const runs = Array.isArray(block.runs) ? block.runs : [];
+          const blockId =
+            typeof block.blockId === "string" ? block.blockId : undefined;
+          let fullTextLength: number | undefined;
+          if (blockId) {
+            try {
+              fullTextLength = (await readBlockRawTextByRef(doc, blockId))
+                .length;
+            } catch {
+              fullTextLength =
+                typeof block.text === "string" ? block.text.length : undefined;
+            }
+          }
+
+          const range = isRecord(block.range) ? block.range : {};
+          const rangeStart =
+            typeof range.start === "number" ? range.start : undefined;
+          const rangeEnd = typeof range.end === "number" ? range.end : undefined;
+          const matchCoversFullBlock =
+            fullTextLength != null &&
+            rangeStart === 0 &&
+            rangeEnd === fullTextLength;
+          const styleGroups = summarizeRunGroups(runs);
+
+          return {
+            blockId: block.blockId,
+            ref: block.ref,
+            nodeType: block.nodeType,
+            paragraphStyle: block.paragraphStyle,
+            range: block.range,
+            fullTextLength,
+            matchCoversFullBlock,
+            text: safePreview(block.text, 120),
+            runSummary: {
+              totalRuns: runs.length,
+              shownRuns: Math.min(runs.length, 20),
+              truncatedRuns: Math.max(runs.length - 20, 0),
+              uniformInlineStyle: styleGroups.length <= 1,
+              styleGroupCount: styleGroups.length,
+              styleGroups,
+            },
+            runs: runs.slice(0, 20).map(summarizeRunStyle),
+          };
+        }),
+      );
+      const recommendedStyleScope =
+        query.withinNodeType === "tableCell" || query.withinNodeId
+          ? "container"
+          : blocks.some(
+                (block) =>
+                  block.matchCoversFullBlock === false ||
+                  block.runSummary.uniformInlineStyle === false,
+              )
+            ? "block"
+            : "match";
       return {
         ...candidate,
         nodeStyle,
+        recommendedStyleScope,
         blocks,
       };
     }),
@@ -1178,18 +1435,41 @@ export async function applyTextStyle(
   }
 
   const applied: string[] = [];
+  const styledInlineTargets: ResolvedInlineTarget[] = [];
   const inline = input.inline;
   const paragraph = input.paragraph;
 
-  for (const { item } of selected) {
-    const target = getMatchTarget(item);
+  for (const { item, candidate } of selected) {
     if (hasKeys(inline)) {
+      const inlineTargets = await resolveInlineTargets(
+        doc,
+        input,
+        item,
+        candidate,
+      );
+      if (!inlineTargets.length) {
+        throw new Error("No selection target was resolved for text style.");
+      }
+
+      for (const inlineTarget of inlineTargets) {
+        await doc.format.apply({
+          target: inlineTarget.target as any,
+          inline,
+          ...(options?.changeMode ? { changeMode: options?.changeMode } : {}),
+        });
+        styledInlineTargets.push(inlineTarget);
+      }
+      applied.push(`inline.${input.styleScope ?? "block"}`);
+    }
+
+    if (false && hasKeys(inline)) {
+      const target = getMatchTarget(item);
       if (!target)
         throw new Error("匹配结果缺少 selection target，无法设置文字样式");
       await doc.format.apply({
         target: target as any,
         inline,
-        ...(options?.changeMode ? { changeMode: options.changeMode } : {}),
+        ...(options?.changeMode ? { changeMode: options?.changeMode } : {}),
       });
       applied.push("inline");
     }
@@ -1246,7 +1526,19 @@ export async function applyTextStyle(
       pattern: input.pattern,
       totalMatches: items.length,
       styledCount: selected.length,
+      styleScope: input.styleScope ?? "block",
+      styledInlineSelectionCount: styledInlineTargets.length,
       applied: Array.from(new Set(applied)),
+      styledInlineTargets: styledInlineTargets.map(
+        ({ scope, blockId, nodeType, textLength }) => ({
+          scope,
+          blockId,
+          nodeType,
+          textLength,
+        }),
+      ),
+      verificationHint:
+        "Call read_text_style on the same target after styling if the user asked to check or confirm style coverage.",
       targets: selected.map(({ candidate }) => candidate),
     },
     null,

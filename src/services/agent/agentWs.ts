@@ -14,6 +14,7 @@ import type {
   AgentEvent,
   AgentStartPayload,
   ApprovalResolution,
+  LlmProvider,
   PermissionMode,
 } from "./agentTypes";
 
@@ -56,6 +57,24 @@ const allowedPermissionModes = new Set<PermissionMode>([
   "auto_apply",
 ]);
 
+const providerDefaults: Record<
+  LlmProvider,
+  { baseURL: string; model: string }
+> = {
+  deepseek: {
+    baseURL: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+  },
+  xiaomimimo: {
+    baseURL: "https://api.xiaomimimo.com/v1",
+    model: "mimo-v2.5-pro",
+  },
+};
+
+function normalizeLlmProvider(provider: unknown): LlmProvider {
+  return provider === "xiaomimimo" ? "xiaomimimo" : "deepseek";
+}
+
 function normalizePermissionMode(mode: unknown): PermissionMode {
   return allowedPermissionModes.has(mode as PermissionMode)
     ? (mode as PermissionMode)
@@ -63,6 +82,8 @@ function normalizePermissionMode(mode: unknown): PermissionMode {
 }
 
 function normalizeStartPayload(payload: AgentStartPayload): AgentStartPayload {
+  const provider = normalizeLlmProvider(payload.llm?.provider);
+  const defaults = providerDefaults[provider];
   const documents =
     payload.documents?.length
       ? payload.documents
@@ -74,10 +95,10 @@ function normalizeStartPayload(payload: AgentStartPayload): AgentStartPayload {
     documents,
     permissionMode: normalizePermissionMode(payload.permissionMode),
     llm: {
-      provider: "deepseek",
+      provider,
       apiKey: payload.llm?.apiKey || "",
-      baseURL: payload.llm?.baseURL || "https://api.deepseek.com",
-      model: payload.llm?.model || "deepseek-flash",
+      baseURL: payload.llm?.baseURL || defaults.baseURL,
+      model: payload.llm?.model || defaults.model,
     },
   };
 }
@@ -175,7 +196,7 @@ export function attachAgentWebSocket(server: Server): WebSocketServer {
 
         if (message.type === "agent.start") {
           const payload = normalizeStartPayload(message.payload);
-          if (payload.llm.provider !== "deepseek") {
+          if (false && payload.llm.provider !== "deepseek") {
             sendRaw(ws, "agent.error", "unknown", {
               message: "第一版只支持 DeepSeek",
             });

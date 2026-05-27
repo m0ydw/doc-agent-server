@@ -3,11 +3,10 @@
 // 设计为内存中的单例 Map，配合磁盘元数据完成双向索引
 // 注册时机：服务启动扫描（initFileRegistry）、文档上传（registerDocument）
 // 注销时机：文档删除（unregisterDocument）
-// LLM 集成：toContextString() 生成文档列表提示词，供 AI Agent 理解可用文档集合
 
-import { getDocumentList, getDocumentById, DocumentMetadata } from "./docServices";
+import { getDocumentList, DocumentMetadata } from "./docServices";
 
-export interface DocRegistryEntry {
+interface DocRegistryEntry {
   docId: string;
   docPath: string;
   originalName: string;
@@ -42,68 +41,8 @@ class FileRegistry {
   unregister(docId: string): void {
     const entry = this.docs.get(docId);
     if (entry) {
-      console.log(`[FileRegistry] 注销文档: ${entry.originalName} (${docId})`);
       this.docs.delete(docId);
     }
-  }
-
-  /**
-   * 根据 docId 查询
-   */
-  get(docId: string): DocRegistryEntry | undefined {
-    return this.docs.get(docId);
-  }
-
-  /**
-   * 根据文件名模糊匹配（用于 LLM 按文件名查找）
-   */
-  getByName(name: string): DocRegistryEntry | undefined {
-    const lowerName = name.toLowerCase();
-    for (const entry of this.docs.values()) {
-      if (entry.originalName.toLowerCase() === lowerName) return entry;
-    }
-    for (const entry of this.docs.values()) {
-      if (entry.originalName.toLowerCase().includes(lowerName)) return entry;
-    }
-    return undefined;
-  }
-
-  /**
-   * 获取所有已注册文档
-   */
-  getAll(): DocRegistryEntry[] {
-    return Array.from(this.docs.values());
-  }
-
-  /**
-   * 获取注册数量
-   */
-  get count(): number {
-    return this.docs.size;
-  }
-
-  /**
-   * 生成给 LLM 的文档列表描述文本
-   */
-  toContextString(contextDocId?: string): string {
-    const entries = this.getAll();
-    if (entries.length === 0) return "当前没有可操作的文档。";
-
-    const lines = ["当前可操作的文档："];
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      const marker = entry.docId === contextDocId ? " ← 当前查看" : "";
-      lines.push(`  ${i + 1}. ${entry.originalName} (ID: ${entry.docId})${marker}`);
-    }
-    if (contextDocId) {
-      const current = this.get(contextDocId);
-      if (current) {
-        lines.push(`\n用户当前正在查看: ${current.originalName}`);
-        lines.push(`如需操作该文档，targetDocId 设为: ${contextDocId}`);
-      }
-    }
-    lines.push("\n用户可通过文件名或 ID 指定要操作的文档。");
-    return lines.join("\n");
   }
 }
 

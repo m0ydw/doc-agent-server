@@ -84,6 +84,9 @@ const SYSTEM_PROMPT = [
   "写入前优先 dry_run_write_cells；写入后必须 verify_cells。",
   "如果写入或替换需要用户审批，工具会暂停到审批完成；审批结果返回后再继续判断和总结。",
   "工具 detail 可能很长，最终回答只总结关键结果。",
+  "样式规则：设置字体、字号、颜色、加粗等 inline 样式时，默认使用 apply_text_style 的 styleScope=block，先用 query.match 定位，再扩展到完整段落/block。",
+  "样式规则：表格单元格有多段时，用户说整格/该单元格/全部内容就用 styleScope=container；用户明确说第一段、某一段或只改命中文字时，才用 block 或 match。",
+  "样式规则：用户要求检查、确认或样式一致时，写入样式后必须调用 read_text_style 查看相关 block/runs；如果发现只覆盖部分 runs，要用更大的 styleScope 修正。",
   "When the task is fully complete, call the finalAnswer tool exactly once as a signal only. Do not put the final answer in tool arguments or JSON. After finalAnswer returns, produce the final answer as normal Chinese text so it streams through textStream.",
 ].join("\n");
 
@@ -152,8 +155,8 @@ function emit(runId: string, type: AgentEvent["type"], payload: Record<string, u
  * @param run - Agent 运行实例，包含 LLM 配置
  * @returns 模型实例，可传递给 streamText 使用
  */
-function createDeepSeekModel(run: AgentRun) {
-  if (run.llm.provider !== "deepseek") {
+function createAgentModel(run: AgentRun) {
+  if (false && run.llm.provider !== "deepseek") {
     throw new Error("第一版 Agent 只支持 DeepSeek provider");
   }
   if (!run.llm.apiKey) {
@@ -161,12 +164,16 @@ function createDeepSeekModel(run: AgentRun) {
   }
 
   const provider = createOpenAICompatible({
-    name: "deepseek",
-    baseURL: run.llm.baseURL || "https://api.deepseek.com",
+    name: run.llm.provider,
+    baseURL:
+      run.llm.baseURL ||
+      (run.llm.provider === "xiaomimimo"
+        ? "https://api.xiaomimimo.com/v1"
+        : "https://api.deepseek.com"),
     apiKey: run.llm.apiKey,
     includeUsage: true,
   });
-  return provider(run.llm.model || "deepseek-flash");
+  return provider(run.llm.model || "deepseek-v4-flash");
 }
 
 /**
@@ -245,7 +252,7 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
     );
 
     // 创建 LLM 模型实例
-    const model = createDeepSeekModel(run);
+    const model = createAgentModel(run);
 
     // 创建工具集合
     // createAgentTools 返回一个对象，每个属性是一个工具定义

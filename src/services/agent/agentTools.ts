@@ -195,6 +195,13 @@ const textStyleSchema = textTargetSchema.extend({
   inline: inlineTextStyleSchema.optional(),
   paragraph: paragraphTextStyleSchema.optional(),
   paragraphStyleId: z.string().optional(),
+  styleScope: z
+    .enum(["match", "block", "container"])
+    .default("block")
+    .optional()
+    .describe(
+      "Inline style scope. Use block by default; use match only for the exact matched text; use container for all text blocks inside a table cell/container.",
+    ),
 });
 
 const createDocumentSchema = z.object({

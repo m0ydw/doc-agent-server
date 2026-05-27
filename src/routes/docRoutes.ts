@@ -17,7 +17,7 @@ import {
   DocumentMetadata,
 } from "../services/docServices";
 import * as sessionManager from "../services/session";
-import { registerDocument, unregisterDocument } from "../services/fileRegistry";
+import { registerDocument, unregisterDocument, initFileRegistry } from "../services/fileRegistry";
 
 const router: Router = express.Router();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
@@ -79,8 +79,7 @@ router.post("/cleanup", async (req: Request, res: Response) => {
     await sessionManager.closeAllSessions();
     const deleted = await cleanupDocuments(keepIds);
     // 重新扫描 uploads 目录重建注册表，保证后续操作的数据一致性
-    const { initFileRegistry } = await import("../services/fileRegistry");
-    initFileRegistry();
+    await initFileRegistry();
     res.json({ success: true, message: "清理完成", deleted: deleted });
   } catch (error) {
     console.error("清理文件失败:", error);

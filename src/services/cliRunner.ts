@@ -2,15 +2,11 @@
 // 为什么用单例：SDK 客户端创建开销较大（连接、握手），复用可提升性能
 // 为什么需要并发保护：多个请求可能同时触发客户端创建，需防止重复创建
 
-import path from "path";
 import type {
   DocOpenParams,
   SuperDocClient,
   SuperDocDocument,
 } from "@superdoc-dev/sdk";
-
-// uploads 目录的绝对路径，所有文档文件存放在此
-const DOCS_DIR = path.join(__dirname, "../../uploads");
 
 // SDK 客户端状态变量
 let client: SuperDocClient | null = null; // 客户端实例（单例）
@@ -82,8 +78,6 @@ export interface OpenParams {
   sessionId?: DocOpenParams["sessionId"]; // 会话 ID，用于标识本次编辑会话
   collabUrl?: DocOpenParams["collabUrl"]; // 协作 WebSocket 服务地址（如 ws://localhost:1234）
   collabDocumentId?: DocOpenParams["collabDocumentId"]; // 协作房间名/文档 ID，对应 y-websocket room
-  onMissing?: DocOpenParams["onMissing"]; // 文档不存在时的处理策略
-  bootstrapSettlingMs?: DocOpenParams["bootstrapSettlingMs"]; // 引导数据稳定等待时间
 }
 
 // openDocument — 打开一个文档并返回文档句柄
@@ -97,8 +91,6 @@ async function openDocument(params: OpenParams): Promise<SuperDocDocument> {
     sessionId,
     collabUrl,
     collabDocumentId,
-    onMissing,
-    bootstrapSettlingMs,
   } = params;
   const sdkClient = await getClient();
 
@@ -115,9 +107,6 @@ async function openDocument(params: OpenParams): Promise<SuperDocDocument> {
   if (collabUrl) {
     openPayload.collabUrl = collabUrl;
     if (collabDocumentId) openPayload.collabDocumentId = collabDocumentId;
-    if (onMissing) openPayload.onMissing = onMissing;
-    if (bootstrapSettlingMs)
-      openPayload.bootstrapSettlingMs = bootstrapSettlingMs;
   }
 
   const doc = await sdkClient.open(openPayload);
@@ -142,4 +131,4 @@ async function closeDocument(doc: RoomDocument | null): Promise<void> {
   }
 }
 
-export { disposeClient, openDocument, closeDocument, DOCS_DIR };
+export { disposeClient, openDocument, closeDocument };

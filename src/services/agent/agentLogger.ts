@@ -294,10 +294,3 @@ export function logAgentError(error: unknown): void {
     `   ${colors.red}${error instanceof Error ? error.message : String(error)}${colors.reset}\n`,
   );
 }
-
-/**
- * 检查日志是否开启（供外部判断用）
- */
-export function isDebugLogEnabled(): boolean {
-  return AGENT_DEBUG_LOG;
-}

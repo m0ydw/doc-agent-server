@@ -1,13 +1,12 @@
 import {
   closeDocument,
   disposeClient,
-  DOCS_DIR,
   openDocument,
   type RoomDocument,
   type RoomSessionResult,
 } from "../cliRunner";
 import config from "../../config";
-import { getDocumentById, refreshSavedStateFromDisk } from "../docServices";
+import { getDocumentById, refreshSavedStateFromDisk, UPLOAD_DIR } from "../docServices";
 
 type SessionEntry = {
   sessionId: string;
@@ -74,7 +73,7 @@ export async function createOrUseSession(
     metadata.filePath?.replace("/uploads/", "") || metadata.storedName;
   const docPath = fileName.startsWith("/")
     ? fileName
-    : `${DOCS_DIR}/${fileName}`;
+    : `${UPLOAD_DIR}/${fileName}`;
   const sessionId = `session-${roomName}-${Date.now()}`;
 
   console.log(
