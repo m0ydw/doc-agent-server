@@ -32,6 +32,12 @@ export function createRun(payload: AgentStartPayload): AgentRun {
     prompt: payload.prompt,
     permissionMode: payload.permissionMode,
     llm: payload.llm,
+    toolPolicy: {
+      documentToolCallCount: 0,
+      hasLowTokenExploration: false,
+      fullTextBlockedCount: 0,
+      completedStyleVerificationCount: 0,
+    },
     status: "running",
     events: [],
     pendingApprovals: [],

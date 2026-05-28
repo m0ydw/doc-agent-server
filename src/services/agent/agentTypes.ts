@@ -94,9 +94,31 @@ export type AgentRun = {
   prompt: string;
   permissionMode: PermissionMode;
   llm: LlmConfig;
+  toolPolicy: AgentToolPolicyState;
   status: AgentRunStatus;
   events: AgentEvent[];
   pendingApprovals: PendingApproval[];
   createdAt: number;
   updatedAt: number;
+};
+
+export type FullTextReadPurpose =
+  | "explicit_full_document_request"
+  | "targeted_tools_insufficient"
+  | "final_integrity_check";
+
+export type PendingStyleVerification = {
+  documentName?: string;
+  query: Record<string, unknown>;
+  sourceTool: "apply_text_style";
+  createdAt: number;
+};
+
+export type AgentToolPolicyState = {
+  documentToolCallCount: number;
+  hasLowTokenExploration: boolean;
+  fullTextBlockedCount: number;
+  lastFullTextBlockedReason?: string;
+  pendingStyleVerification?: PendingStyleVerification;
+  completedStyleVerificationCount: number;
 };

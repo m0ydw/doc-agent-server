@@ -27,3 +27,4 @@ logs/
 *.sw*
 
 uploads/
+data/agent-memory/

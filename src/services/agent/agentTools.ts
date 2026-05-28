@@ -26,6 +26,11 @@ import {
   logToolOutput,
   logToolError,
 } from "./agentLogger";
+import {
+  getPendingStyleVerification,
+  recordToolFinished,
+  shouldAllowFullTextRead,
+} from "./agentToolPolicy";
 
 type EmitAgentEvent = (
   type: AgentEvent["type"],
@@ -264,6 +269,25 @@ const createDocumentSchema = z.object({
   paragraphs: z.array(z.string()).optional(),
 });
 
+const getTextSchema = z.object({
+  documentName: z.string().optional(),
+  purpose: z
+    .enum([
+      "explicit_full_document_request",
+      "targeted_tools_insufficient",
+      "final_integrity_check",
+    ])
+    .describe(
+      "Required. Full text is expensive: use explicit_full_document_request only when the user asked for full-document reading, targeted_tools_insufficient after low-token tools were tried, or final_integrity_check after edits.",
+    ),
+  reason: z
+    .string()
+    .min(8)
+    .describe(
+      "Required. Explain why low-token tools such as find_text, inspect_text_blocks, read_text_block, or inspect_document_tables are insufficient.",
+    ),
+});
+
 function parseJsonResult(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -341,11 +365,26 @@ function documentNameFromArgs(input: unknown): string | undefined {
     : undefined;
 }
 
+function styleVerificationQueryFromInput(input: unknown): Record<string, unknown> {
+  const source = isRecord(input) ? input : {};
+  const styleSource = isRecord(source.styleInput) ? source.styleInput : source;
+  const {
+    inline: _inline,
+    paragraph: _paragraph,
+    paragraphStyleId: _paragraphStyleId,
+    styleScope: _styleScope,
+    permissionMode: _permissionMode,
+    ...query
+  } = styleSource;
+  return query;
+}
+
 async function withToolEvents<T extends ToolResult>(
   emit: EmitAgentEvent,
   name: string,
   input: unknown,
   run: () => Promise<T>,
+  policyRun?: AgentRun,
 ): Promise<T> {
   // ========== 调试日志：工具调用开始 ==========
   logToolCall(name);
@@ -354,6 +393,17 @@ async function withToolEvents<T extends ToolResult>(
   emit("tool.started", { name, input });
   try {
     const result = await run();
+    if (name === "apply_text_style" && result.status === "ok") {
+      result.detail = {
+        result: result.detail,
+        needsStyleVerification: true,
+        verificationTool: "read_text_style",
+        documentName: documentNameFromArgs(input),
+        verificationQuery: styleVerificationQueryFromInput(input),
+        verificationInstruction:
+          "Call read_text_style with verificationQuery before finalAnswer. If coverage is partial, retry apply_text_style with a broader styleScope.",
+      };
+    }
 
     // ========== 调试日志：工具返回值 ==========
     logToolOutput({
@@ -367,7 +417,11 @@ async function withToolEvents<T extends ToolResult>(
       status: result.status,
       summary: result.summary,
       detail: result.detail,
+      input,
     });
+    if (policyRun) {
+      recordToolFinished(policyRun, name, input, result.status);
+    }
     return result;
   } catch (error) {
     // ========== 调试日志：工具错误 ==========
@@ -383,7 +437,11 @@ async function withToolEvents<T extends ToolResult>(
       status: result.status,
       summary: result.summary,
       detail: result.detail,
+      input,
     });
+    if (policyRun) {
+      recordToolFinished(policyRun, name, input, result.status);
+    }
     return result as T;
   }
 }
@@ -455,15 +513,27 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
     ...createSuperDocIntentTools(run, emit, superDocResources),
     finalAnswer: tool({
       description:
-        "Call this exactly once when all required tool work is complete. This is only a signal; do not include the final answer here. After this tool returns, write the final answer as normal text.",
+        "Call this exactly once when all required tool work is complete. Do not call while style verification is pending. This is only a signal; do not include the final answer here. After this tool returns, write the final answer as normal text.",
       inputSchema: finalAnswerSchema,
       execute: async () =>
         withToolEvents(emit, "finalAnswer", {}, async () => {
+          const pendingStyleVerification = getPendingStyleVerification(run);
+          if (pendingStyleVerification) {
+            return {
+              status: "blocked",
+              summary:
+                "样式写入后仍需验证。请先按 detail.verificationQuery 调用 read_text_style，确认 block/runs 覆盖范围后再结束。",
+              detail: {
+                verificationQuery: pendingStyleVerification.query,
+                documentName: pendingStyleVerification.documentName,
+              },
+            };
+          }
           return {
             status: "ok",
             summary: "Ready for final text response.",
           };
-        }),
+        }, run),
     }),
 
     create_document: tool({
@@ -508,23 +578,39 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
           },
         ),
     }),
-
     get_text: tool({
-      description:
-        "读取某个 DOCX 文档全文。documentName 不填时读取当前文档。",
-      inputSchema: z.object({
-        documentName: z.string().optional(),
-      }),
-      execute: async ({ documentName }) =>
-        withToolEvents(emit, "get_text", { documentName }, async () => {
-          const doc = requireDocument(run, documentName);
-          const text = await editor.getText(doc.id);
-          return {
-            status: "ok",
-            summary: `已读取《${doc.name}》全文，长度 ${text.length} 字符。`,
-            detail: { text },
-          };
-        }),
+      description: [
+        "High token / last resort. Reads the full DOCX plain text.",
+        "Use when: the user explicitly asks for full-document reading, summary, overall review, or targeted tools have already proven insufficient.",
+        "Do not use when: starting a task, locating text, changing styles, editing tables, or checking a small region.",
+        "Prefer first: find_text, inspect_text_blocks, read_text_block, inspect_document_tables.",
+        "Requires purpose and reason; policy blocks unjustified full-document reads.",
+      ].join(" "),
+      inputSchema: getTextSchema,
+      execute: async ({ documentName, purpose, reason }) =>
+        withToolEvents(
+          emit,
+          "get_text",
+          { documentName, purpose, reason },
+          async () => {
+            const policy = shouldAllowFullTextRead(run, { purpose, reason });
+            if (!policy.allowed) {
+              return {
+                status: "blocked",
+                summary: policy.summary ?? "get_text blocked by policy.",
+                detail: policy.detail,
+              };
+            }
+            const doc = requireDocument(run, documentName);
+            const text = await editor.getText(doc.id);
+            return {
+              status: "ok",
+              summary: `Read full text from ${doc.name}; length ${text.length} characters.`,
+              detail: { text },
+            };
+          },
+          run,
+        ),
     }),
 
     find_text: tool({

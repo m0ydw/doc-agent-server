@@ -28,6 +28,14 @@ import {
 } from "./agentSessionManager";
 import { saveSessionDocuments } from "../session";
 import { createAgentTools, getSuperDocAgentSystemPrompt } from "./agentTools";
+import {
+  buildToolUsageGuidance,
+  getPendingStyleVerification,
+} from "./agentToolPolicy";
+import {
+  persistRunMemory,
+  summarizeRelevantMemory,
+} from "./agentMemory";
 import type { AgentEvent, AgentRun } from "./agentTypes";
 import {
   logAgentStart,
@@ -98,6 +106,10 @@ const SYSTEM_PROMPT = [
   "样式规则：设置字体、字号、颜色、加粗等 inline 样式时，默认使用 apply_text_style 的 styleScope=block，先用 query.match 定位，再扩展到完整段落/block。",
   "样式规则：表格单元格有多段时，用户说整格/该单元格/全部内容就用 styleScope=container；用户明确说第一段、某一段或只改命中文字时，才用 block 或 match。",
   "样式规则：用户要求检查、确认或样式一致时，写入样式后必须调用 read_text_style 查看相关 block/runs；如果发现只覆盖部分 runs，要用更大的 styleScope 修正。",
+  "工具策略：默认先用低 token 定位工具，不要开局读取全文。优先 find_text、inspect_text_blocks、read_text_block、inspect_document_tables。",
+  "工具策略：只有用户明确要求全文/通读/整篇总结/整体审阅，或低 token 工具已经不足时，才允许调用 get_text；get_text 必须带 purpose 和 reason。",
+  "样式策略：任何 apply_text_style 成功后，都必须在 finalAnswer 前调用 read_text_style 检查同一目标的 block/runs 覆盖范围。",
+  "记忆策略：系统可能提供历史偏好摘要；只把它当作偏好和约束，不要把历史摘要当作文档当前全文。",
   "When the task is fully complete, call the finalAnswer tool exactly once as a signal only. Do not put the final answer in tool arguments or JSON. After finalAnswer returns, produce the final answer as normal Chinese text so it streams through textStream.",
 ].join("\n");
 
@@ -277,11 +289,20 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
 
     // 构建完整的系统提示词
     const superDocSystemPrompt = await getSuperDocAgentSystemPrompt();
-    const fullSystemPrompt = `${SYSTEM_PROMPT}\n\n${superDocSystemPrompt}\n\n${buildDocumentContext(run)}`;
+    const documentContext = buildDocumentContext(run);
+    const toolUsageGuidance = buildToolUsageGuidance(run);
+    const memoryContext = await summarizeRelevantMemory(run);
+    const fullSystemPrompt = [
+      SYSTEM_PROMPT,
+      superDocSystemPrompt,
+      documentContext,
+      toolUsageGuidance,
+      memoryContext,
+    ].join("\n\n");
 
     // ========== 调试日志：打印 System Prompt 和文档上下文 ==========
     logSystemPrompt(SYSTEM_PROMPT);
-    logDocumentContext(buildDocumentContext(run));
+    logDocumentContext(documentContext);
 
     // 用于收集每步的流式文本（在工具调用前输出的 LLM 思考文本）
     let stepTextBuffer = "";
@@ -307,6 +328,12 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
           lastStep?.toolCalls?.some((toolCall) => toolCall.toolName === "finalAnswer") ?? false;
 
         if (!isAfterFinalAnswer) return undefined;
+        const latestRun = getRun(runId);
+        if (latestRun && getPendingStyleVerification(latestRun)) {
+          return {
+            system: `${fullSystemPrompt}\n\nA finalAnswer call was blocked because style verification is pending. Call read_text_style with the pending verification query, then continue.`,
+          };
+        }
 
         return {
           toolChoice: "none",
@@ -373,6 +400,10 @@ export async function runAgent(runId: string, send: EmitToClient): Promise<void>
         }
 
         // 正常完成，更新状态并发送完成事件
+        if (latestRun) {
+          await persistRunMemory(latestRun, text);
+        }
+
         setRunStatus(runId, "finished");
         emit(
           runId,
