@@ -1467,6 +1467,160 @@ export async function readTextStyle(
   );
 }
 
+function firstRecord(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function parseStyleJsonResult(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function pickDefined(
+  source: Record<string, unknown>,
+  keys: string[],
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (source[key] !== undefined && source[key] !== null) {
+      result[key] = source[key];
+    }
+  }
+  return result;
+}
+
+function extractInlineStyleFromRun(run: unknown): Record<string, unknown> {
+  const source = firstRecord(run);
+  if (!source) return {};
+  const styles = firstRecord(source.styles);
+  const direct = firstRecord(styles?.direct);
+  const effective = firstRecord(styles?.effective);
+  return {
+    ...pickDefined(source, [
+      "bold",
+      "italic",
+      "underline",
+      "strike",
+      "color",
+      "highlight",
+      "fontSize",
+      "fontFamily",
+      "shading",
+    ]),
+    ...pickDefined(direct ?? {}, [
+      "bold",
+      "italic",
+      "underline",
+      "strike",
+      "color",
+      "highlight",
+      "fontSize",
+      "fontFamily",
+      "shading",
+    ]),
+    ...pickDefined(effective ?? {}, [
+      "bold",
+      "italic",
+      "underline",
+      "strike",
+      "color",
+      "highlight",
+      "fontSize",
+      "fontFamily",
+      "shading",
+    ]),
+  };
+}
+
+function extractParagraphStyleFromBlock(block: unknown): Record<string, unknown> {
+  const source = firstRecord(block);
+  const paragraphStyle = firstRecord(source?.paragraphStyle);
+  if (!paragraphStyle) return {};
+  return pickDefined(paragraphStyle, [
+    "alignment",
+    "indentation",
+    "spacing",
+    "shading",
+  ]);
+}
+
+export function extractApplicableTextStyle(readTextStyleResult: unknown): {
+  success: boolean;
+  inline?: InlineTextStyleInput;
+  paragraph?: ParagraphTextStyleInput;
+  paragraphStyleId?: string;
+  reason?: string;
+  detail?: unknown;
+} {
+  const parsed =
+    typeof readTextStyleResult === "string"
+      ? parseStyleJsonResult(readTextStyleResult)
+      : readTextStyleResult;
+  const root = firstRecord(parsed);
+  const targets = Array.isArray(root?.targets) ? root.targets : [];
+  if (targets.length !== 1) {
+    return {
+      success: false,
+      reason: `Expected exactly one reference style target, got ${targets.length}.`,
+      detail: parsed,
+    };
+  }
+
+  const target = firstRecord(targets[0]);
+  const blocks = Array.isArray(target?.blocks) ? target.blocks : [];
+  if (blocks.length !== 1) {
+    return {
+      success: false,
+      reason: `Expected exactly one reference block, got ${blocks.length}.`,
+      detail: target,
+    };
+  }
+
+  const block = firstRecord(blocks[0]);
+  const runSummary = firstRecord(block?.runSummary);
+  const uniformInlineStyle = runSummary?.uniformInlineStyle !== false;
+  if (!uniformInlineStyle) {
+    return {
+      success: false,
+      reason:
+        "Reference target contains multiple inline style groups; use a more precise source target.",
+      detail: runSummary,
+    };
+  }
+
+  const runs = Array.isArray(block?.runs) ? block.runs : [];
+  const inline = extractInlineStyleFromRun(runs[0]);
+  const paragraph = extractParagraphStyleFromBlock(block);
+  const paragraphStyleId =
+    typeof block?.paragraphStyle === "string"
+      ? block.paragraphStyle
+      : typeof firstRecord(block?.paragraphStyle)?.styleId === "string"
+        ? (firstRecord(block?.paragraphStyle)?.styleId as string)
+        : undefined;
+
+  if (!Object.keys(inline).length && !Object.keys(paragraph).length && !paragraphStyleId) {
+    return {
+      success: false,
+      reason: "No applicable text or paragraph style fields were found.",
+      detail: block,
+    };
+  }
+
+  return {
+    success: true,
+    inline: Object.keys(inline).length
+      ? (inline as InlineTextStyleInput)
+      : undefined,
+    paragraph: Object.keys(paragraph).length
+      ? (paragraph as ParagraphTextStyleInput)
+      : undefined,
+    paragraphStyleId,
+  };
+}
+
 export async function applyTextStyle(
   docId: string,
   input: TextStyleInput,

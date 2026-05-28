@@ -24,6 +24,8 @@ export const insertTextAtBlockOffset = formatOperations.insertTextAtBlockOffset;
 export const findTextTargets = formatOperations.findTextTargets;
 export const readTextStyle = formatOperations.readTextStyle;
 export const applyTextStyle = formatOperations.applyTextStyle;
+export const extractApplicableTextStyle =
+  formatOperations.extractApplicableTextStyle;
 /**
  * 【新增】单元格批量写入函数
  * 

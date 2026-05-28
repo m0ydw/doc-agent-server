@@ -1,12 +1,15 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Server } from "http";
 import * as editor from "../editor";
+import * as sessionManager from "../session";
 import {
   addEvent,
   cancelRun,
   createRun,
   getRun,
   resolveApprovalResult,
+  resolveInputResult,
+  resolvePendingInput,
   resolvePendingApproval,
 } from "./agentSessionManager";
 import { runAgent } from "./agentRunner";
@@ -31,6 +34,14 @@ type ClientMessage =
           approved: boolean;
           reason?: string;
         }>;
+      };
+    }
+  | {
+      type: "agent.input.resolve";
+      runId: string;
+      payload: {
+        inputRequestId: string;
+        answer: string;
       };
     }
   | { type: "agent.replay"; runId: string };
@@ -135,6 +146,7 @@ async function handleApprovalResolve(
   const writeResult = [];
   const verifyResult = [];
   const replaceResult = [];
+  const changedDocIds = new Set<string>();
 
   for (const item of approved) {
     const targetDoc =
@@ -154,6 +166,7 @@ async function handleApprovalResolve(
           },
         ])),
       );
+      changedDocIds.add(targetDoc.id);
     } else {
       const cell = {
         ref: item.ref,
@@ -162,8 +175,12 @@ async function handleApprovalResolve(
       };
       writeResult.push(...(await editor.writeCellsText(targetDoc.id, [cell])));
       verifyResult.push(...(await editor.verifyCells(targetDoc.id, [cell])));
+      changedDocIds.add(targetDoc.id);
     }
   }
+  const saveResult = await sessionManager.saveSessionDocuments(
+    Array.from(changedDocIds),
+  );
 
   const resolution: ApprovalResolution = {
     approvalId: approval.approvalId,
@@ -174,10 +191,41 @@ async function handleApprovalResolve(
     writeResult,
     verifyResult,
     replaceResult,
+    saveResult,
   };
   const event = addEvent(message.runId, "approval.resolved", resolution);
   send(ws, event);
   resolveApprovalResult(approval.approvalId, resolution);
+}
+
+function handleInputResolve(
+  ws: WebSocket,
+  message: Extract<ClientMessage, { type: "agent.input.resolve" }>,
+): void {
+  const run = getRun(message.runId);
+  if (!run) {
+    sendRaw(ws, "agent.error", message.runId, { message: "Agent run 不存在" });
+    return;
+  }
+
+  const input = resolvePendingInput(
+    message.runId,
+    message.payload.inputRequestId,
+  );
+  if (!input) {
+    sendRaw(ws, "agent.error", message.runId, {
+      message: "Agent 输入请求不存在或已处理",
+    });
+    return;
+  }
+
+  const resolution = {
+    inputRequestId: input.inputRequestId,
+    answer: message.payload.answer,
+  };
+  const event = addEvent(message.runId, "agent.input.resolved", resolution);
+  send(ws, event);
+  resolveInputResult(input.inputRequestId, resolution);
 }
 
 export function attachAgentWebSocket(server: Server): WebSocketServer {
@@ -240,6 +288,12 @@ export function attachAgentWebSocket(server: Server): WebSocketServer {
 
         if (message.type === "agent.approval.resolve") {
           await handleApprovalResolve(ws, message);
+          return;
+        }
+
+        if (message.type === "agent.input.resolve") {
+          handleInputResolve(ws, message);
+          return;
         }
       })();
     });

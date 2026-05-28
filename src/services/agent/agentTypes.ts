@@ -35,6 +35,8 @@ export type AgentEventType =
   | "tool.finished"
   | "approval.requested"
   | "approval.resolved"
+  | "agent.input.requested"
+  | "agent.input.resolved"
   | "agent.finished"
   | "agent.error";
 
@@ -78,6 +80,22 @@ export type ApprovalResolution = {
   writeResult: unknown[];
   verifyResult: unknown[];
   replaceResult: unknown[];
+  saveResult?: unknown[];
+};
+
+export type AgentInputRequest = {
+  inputRequestId: string;
+  toolCallId?: string;
+  question: string;
+  reason?: string;
+  expectedAnswerType?: "text" | "choice" | "yes_no";
+  choices?: string[];
+  createdAt: number;
+};
+
+export type AgentInputResolution = {
+  inputRequestId: string;
+  answer: string;
 };
 
 export type AgentRunStatus =
@@ -98,6 +116,7 @@ export type AgentRun = {
   status: AgentRunStatus;
   events: AgentEvent[];
   pendingApprovals: PendingApproval[];
+  pendingInputs: AgentInputRequest[];
   createdAt: number;
   updatedAt: number;
 };

@@ -109,6 +109,9 @@ const SYSTEM_PROMPT = [
   "工具策略：默认先用低 token 定位工具，不要开局读取全文。优先 find_text、inspect_text_blocks、read_text_block、inspect_document_tables。",
   "工具策略：只有用户明确要求全文/通读/整篇总结/整体审阅，或低 token 工具已经不足时，才允许调用 get_text；get_text 必须带 purpose 和 reason。",
   "样式策略：任何 apply_text_style 成功后，都必须在 finalAnswer 前调用 read_text_style 检查同一目标的 block/runs 覆盖范围。",
+  "参考样式策略：用户提供参考文档时，优先使用 transfer_text_style_from_reference；必须逐目标从参考文档采样样式，不要把第一个样式套给所有写入内容。",
+  "补问信息策略：如果参考文档和目标文档的对应关系、候选样式或写入范围不明确，调用 ask_user 暂停询问，不要猜测后写入。",
+  "保存策略：写入工具成功后会立即保存对应文档；总结时说明保存结果，不要暗示用户切换文档后还需要手动保存。",
   "记忆策略：系统可能提供历史偏好摘要；只把它当作偏好和约束，不要把历史摘要当作文档当前全文。",
   "When the task is fully complete, call the finalAnswer tool exactly once as a signal only. Do not put the final answer in tool arguments or JSON. After finalAnswer returns, produce the final answer as normal Chinese text so it streams through textStream.",
 ].join("\n");

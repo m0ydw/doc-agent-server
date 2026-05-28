@@ -4,6 +4,8 @@ import type {
   AgentEventType,
   AgentRun,
   AgentRunStatus,
+  AgentInputRequest,
+  AgentInputResolution,
   AgentStartPayload,
   ApprovalItem,
   ApprovalResolution,
@@ -14,6 +16,10 @@ const runs = new Map<string, AgentRun>();
 const approvalResolvers = new Map<
   string,
   (resolution: ApprovalResolution) => void
+>();
+const inputResolvers = new Map<
+  string,
+  (resolution: AgentInputResolution) => void
 >();
 
 export function createRun(payload: AgentStartPayload): AgentRun {
@@ -41,6 +47,7 @@ export function createRun(payload: AgentStartPayload): AgentRun {
     status: "running",
     events: [],
     pendingApprovals: [],
+    pendingInputs: [],
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -109,6 +116,68 @@ export function waitForApprovalResult(
   });
 }
 
+export function addPendingInput(
+  runId: string,
+  request: Omit<AgentInputRequest, "inputRequestId" | "createdAt">,
+): AgentInputRequest {
+  const run = runs.get(runId);
+  if (!run) {
+    throw new Error(`Agent run 不存在: ${runId}`);
+  }
+
+  const inputRequest: AgentInputRequest = {
+    ...request,
+    inputRequestId: randomUUID(),
+    createdAt: Date.now(),
+  };
+  run.pendingInputs.push(inputRequest);
+  inputResolvers.set(inputRequest.inputRequestId, () => {});
+  run.status = "waiting_approval";
+  run.updatedAt = Date.now();
+  return inputRequest;
+}
+
+export function waitForInputResult(
+  inputRequestId: string,
+): Promise<AgentInputResolution> {
+  return new Promise((resolve) => {
+    inputResolvers.set(inputRequestId, resolve);
+  });
+}
+
+export function resolvePendingInput(
+  runId: string,
+  inputRequestId: string,
+): AgentInputRequest | undefined {
+  const run = runs.get(runId);
+  if (!run) return undefined;
+
+  const index = run.pendingInputs.findIndex(
+    (input) => input.inputRequestId === inputRequestId,
+  );
+  if (index < 0) return undefined;
+
+  const [input] = run.pendingInputs.splice(index, 1);
+  run.updatedAt = Date.now();
+  if (
+    run.pendingApprovals.length === 0 &&
+    run.pendingInputs.length === 0 &&
+    run.status === "waiting_approval"
+  ) {
+    run.status = "running";
+  }
+  return input;
+}
+
+export function resolveInputResult(
+  inputRequestId: string,
+  resolution: AgentInputResolution,
+): void {
+  const resolver = inputResolvers.get(inputRequestId);
+  inputResolvers.delete(inputRequestId);
+  resolver?.(resolution);
+}
+
 export function resolveApprovalResult(
   approvalId: string,
   resolution: ApprovalResolution,
@@ -132,7 +201,11 @@ export function resolvePendingApproval(
 
   const [approval] = run.pendingApprovals.splice(index, 1);
   run.updatedAt = Date.now();
-  if (run.pendingApprovals.length === 0 && run.status === "waiting_approval") {
+  if (
+    run.pendingApprovals.length === 0 &&
+    run.pendingInputs.length === 0 &&
+    run.status === "waiting_approval"
+  ) {
     run.status = "running";
   }
   return approval;

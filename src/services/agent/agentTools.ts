@@ -11,7 +11,9 @@ import * as sessionManager from "../session";
 import { createBlankDocument } from "../docServices";
 import { registerDocument } from "../fileRegistry";
 import {
+  addPendingInput,
   addPendingApproval,
+  waitForInputResult,
   waitForApprovalResult,
 } from "./agentSessionManager";
 import type {
@@ -288,6 +290,39 @@ const getTextSchema = z.object({
     ),
 });
 
+const askUserSchema = z.object({
+  question: z.string().min(1),
+  reason: z.string().optional(),
+  expectedAnswerType: z.enum(["text", "choice", "yes_no"]).default("text"),
+  choices: z.array(z.string()).optional(),
+});
+
+const styleMappingSchema = z.object({
+  sourcePattern: z.string().optional(),
+  sourceRef: z.string().optional(),
+  sourceBlockId: z.string().optional(),
+  sourceMatchIndex: z.number().int().min(0).optional(),
+  targetPattern: z.string().optional(),
+  targetRef: z.string().optional(),
+  targetBlockId: z.string().optional(),
+  targetMatchIndex: z.number().int().min(0).optional(),
+  targetStyleScope: z.enum(["match", "block", "container"]).default("block").optional(),
+  reason: z.string().optional(),
+});
+
+const transferTextStyleSchema = z.object({
+  sourceDocumentName: z.string().min(1),
+  targetDocumentName: z.string().min(1),
+  mappings: z.array(styleMappingSchema).min(1),
+  allowOneSourceForManyTargets: z
+    .boolean()
+    .default(false)
+    .optional()
+    .describe(
+      "Only true when the user explicitly says all targets should use the same style.",
+    ),
+});
+
 function parseJsonResult(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -363,6 +398,38 @@ function documentNameFromArgs(input: unknown): string | undefined {
   return isRecord(input) && typeof input.documentName === "string"
     ? input.documentName
     : undefined;
+}
+
+async function saveMutatedDocument(
+  docId: string,
+  reason: string,
+): Promise<{ saved: boolean; hash: string; docId: string; reason: string }> {
+  const result = await sessionManager.saveSessionDocument(docId);
+  return { ...result, reason };
+}
+
+function buildTransferQuery(
+  mapping: z.infer<typeof styleMappingSchema>,
+  prefix: "source" | "target",
+): Record<string, unknown> {
+  const pattern = mapping[`${prefix}Pattern`];
+  const ref = mapping[`${prefix}Ref`];
+  const blockId = mapping[`${prefix}BlockId`];
+  const matchIndex = mapping[`${prefix}MatchIndex`];
+  return {
+    pattern: pattern || ref || blockId || "",
+    ...(ref ? { ref } : {}),
+    ...(blockId ? { blockId } : {}),
+    ...(matchIndex != null ? { matchIndex } : {}),
+  };
+}
+
+function hasUsableTarget(query: Record<string, unknown>): boolean {
+  return Boolean(
+    typeof query.pattern === "string" &&
+      query.pattern.trim() &&
+      (query.pattern || query.ref || query.blockId),
+  );
 }
 
 function styleVerificationQueryFromInput(input: unknown): Record<string, unknown> {
@@ -488,11 +555,17 @@ function createSuperDocIntentTools(
                   run.permissionMode,
                 ),
               );
+              const saveResult = mutates
+                ? await saveMutatedDocument(
+                    targetDoc.id,
+                    `superdoc_tool:${toolName}`,
+                  )
+                : null;
 
               return {
                 status: "ok",
                 summary: `${toolName} completed. ${toSummaryText(result)}`,
-                detail: result,
+                detail: saveResult ? { result, saveResult } : result,
               };
             }),
         }),
@@ -534,6 +607,34 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             summary: "Ready for final text response.",
           };
         }, run),
+    }),
+
+    ask_user: tool({
+      description:
+        "Ask the user for missing information that materially affects document writing. Use before guessing mappings, style choices, or ambiguous edit targets.",
+      inputSchema: askUserSchema,
+      execute: async ({ question, reason, expectedAnswerType, choices }, options) =>
+        withToolEvents(
+          emit,
+          "ask_user",
+          { question, reason, expectedAnswerType, choices },
+          async () => {
+            const request = addPendingInput(run.runId, {
+              toolCallId: options.toolCallId,
+              question,
+              reason,
+              expectedAnswerType,
+              choices,
+            });
+            emit("agent.input.requested", request);
+            const resolution = await waitForInputResult(request.inputRequestId);
+            return {
+              status: "ok",
+              summary: `用户已回答：${resolution.answer}`,
+              detail: resolution,
+            };
+          },
+        ),
     }),
 
     create_document: tool({
@@ -700,6 +801,10 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               mutationOptionsForPermission(run.permissionMode),
             );
             const successful = replaceResult.filter((item) => item.success).length;
+            const saveResult =
+              successful > 0
+                ? await saveMutatedDocument(doc.id, "replace_text")
+                : null;
             const modeText =
               run.permissionMode === "auto_tracked" ? "以修订模式" : "直接";
             return {
@@ -712,6 +817,7 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 changeMode:
                   run.permissionMode === "auto_tracked" ? "tracked" : "default",
                 replaceResult,
+                saveResult,
               },
             };
           },
@@ -830,10 +936,14 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             const result = parseJsonResult(
               await editor.applyTableFormat(doc.id, formatInput),
             );
+            const saveResult = await saveMutatedDocument(
+              doc.id,
+              "apply_table_format",
+            );
             return {
               status: "ok",
               summary: `已设置 ${doc.name} 的表格格式：${toSummaryText(result)}`,
-              detail: result,
+              detail: { result, saveResult },
             };
           },
         ),
@@ -978,10 +1088,144 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 mutationOptionsForPermission(run.permissionMode),
               ),
             );
+            const saveResult = await saveMutatedDocument(
+              doc.id,
+              "apply_text_style",
+            );
             return {
               status: "ok",
               summary: `已设置 ${doc.name} 的文本样式：${toSummaryText(result)}`,
-              detail: result,
+              detail: { result, saveResult },
+            };
+          },
+        ),
+    }),
+
+    transfer_text_style_from_reference: tool({
+      description:
+        "Composite style transfer tool. For each mapping, read style from the reference document, extract applicable inline/paragraph style, apply it to the target document, verify the target style, and save. Do not use one reference style for many targets unless allowOneSourceForManyTargets is true.",
+      inputSchema: transferTextStyleSchema,
+      execute: async ({
+        sourceDocumentName,
+        targetDocumentName,
+        mappings,
+        allowOneSourceForManyTargets,
+      }) =>
+        withToolEvents(
+          emit,
+          "transfer_text_style_from_reference",
+          {
+            sourceDocumentName,
+            targetDocumentName,
+            mappingCount: mappings.length,
+            allowOneSourceForManyTargets,
+            permissionMode: run.permissionMode,
+          },
+          async () => {
+            const sourceDoc = requireDocument(run, sourceDocumentName);
+            const targetDoc = requireDocument(run, targetDocumentName);
+            if (run.permissionMode === "read_only") {
+              return {
+                status: "blocked",
+                summary: "当前是 read_only 模式，不能迁移并写入样式。",
+                detail: { sourceDocumentName, targetDocumentName, mappings },
+              };
+            }
+
+            const sourceKeys = mappings.map((mapping) =>
+              JSON.stringify(buildTransferQuery(mapping, "source")),
+            );
+            if (
+              mappings.length > 1 &&
+              !allowOneSourceForManyTargets &&
+              new Set(sourceKeys).size !== sourceKeys.length
+            ) {
+              return {
+                status: "blocked",
+                summary:
+                  "样式迁移被阻止：多个目标不能默认共用同一个参考样式。请为每个目标提供对应的 source mapping，或明确 allowOneSourceForManyTargets=true。",
+                detail: { sourceKeys, mappings },
+              };
+            }
+
+            const results = [];
+            for (const [index, mapping] of mappings.entries()) {
+              const sourceQuery = buildTransferQuery(mapping, "source");
+              const targetQuery = buildTransferQuery(mapping, "target");
+              if (!hasUsableTarget(sourceQuery) || !hasUsableTarget(targetQuery)) {
+                results.push({
+                  index,
+                  success: false,
+                  reason:
+                    "source/target mapping 必须提供 pattern、ref 或 blockId。",
+                  sourceQuery,
+                  targetQuery,
+                });
+                continue;
+              }
+
+              const sourceStyleRaw = await editor.readTextStyle(
+                sourceDoc.id,
+                sourceQuery as any,
+              );
+              const extracted =
+                editor.extractApplicableTextStyle(sourceStyleRaw);
+              if (!extracted.success) {
+                results.push({
+                  index,
+                  success: false,
+                  reason: extracted.reason,
+                  sourceQuery,
+                  targetQuery,
+                  sourceStyle: extracted.detail,
+                });
+                continue;
+              }
+
+              const styleInput = {
+                ...targetQuery,
+                inline: extracted.inline,
+                paragraph: extracted.paragraph,
+                paragraphStyleId: extracted.paragraphStyleId,
+                styleScope: mapping.targetStyleScope ?? "block",
+              };
+              const applyResult = parseJsonResult(
+                await editor.applyTextStyle(
+                  targetDoc.id,
+                  styleInput as any,
+                  mutationOptionsForPermission(run.permissionMode),
+                ),
+              );
+              const verification = parseJsonResult(
+                await editor.readTextStyle(targetDoc.id, targetQuery as any),
+              );
+              const saveResult = await saveMutatedDocument(
+                targetDoc.id,
+                `transfer_text_style_from_reference:${index}`,
+              );
+
+              results.push({
+                index,
+                success: true,
+                sourceQuery,
+                targetQuery,
+                appliedStyle: {
+                  inline: extracted.inline,
+                  paragraph: extracted.paragraph,
+                  paragraphStyleId: extracted.paragraphStyleId,
+                  styleScope: mapping.targetStyleScope ?? "block",
+                },
+                applyResult,
+                verification,
+                saveResult,
+              });
+            }
+
+            const successCount = results.filter((item) => item.success).length;
+            return {
+              status: successCount === mappings.length ? "ok" : "error",
+              summary: `已迁移 ${successCount}/${mappings.length} 个文本样式映射，并保存目标文档。`,
+              detail: { sourceDocumentName, targetDocumentName, results },
             };
           },
         ),
@@ -1014,10 +1258,14 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             const result = parseJsonResult(
               await editor.insertTextAtBlockOffset(doc.id, ref, offset, text),
             );
+            const saveResult = await saveMutatedDocument(
+              doc.id,
+              "insert_text_at_block_offset",
+            );
             return {
               status: "ok",
               summary: `已在 ${doc.name} 的文本块 offset=${offset} 插入文本。`,
-              detail: result,
+              detail: { result, saveResult },
             };
           },
         ),
@@ -1117,6 +1365,10 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               mutationOptions,
             );
             const successCount = writeResult.filter((item) => item.success).length;
+            const saveResult =
+              successCount > 0
+                ? await saveMutatedDocument(doc.id, "write_cells_text")
+                : null;
             if (run.permissionMode === "auto_tracked") {
               return {
                 status: writeResult.every((item) => item.success) ? "ok" : "error",
@@ -1124,6 +1376,7 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 detail: {
                   changeMode: "tracked",
                   writeResult,
+                  saveResult,
                 },
               };
             }
@@ -1132,7 +1385,7 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             return {
               status: "ok",
               summary: `已直接写入 ${writeResult.length} 个单元格，验证匹配 ${verifyResult.filter((item) => item.matched).length} 个。`,
-              detail: { writeResult, verifyResult },
+              detail: { writeResult, verifyResult, saveResult },
             };
           },
         ),
