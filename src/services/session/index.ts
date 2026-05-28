@@ -4,4 +4,5 @@ export const createOrUseSession = sessionManager.createOrUseSession;
 export const closeSessionByDocId = sessionManager.closeSessionByDocId;
 export const closeAllSessions = sessionManager.closeAllSessions;
 export const ensureYjsRoom = sessionManager.ensureYjsRoom;
+export const saveSessionDocument = sessionManager.saveSessionDocument;
 export const saveSessionDocuments = sessionManager.saveSessionDocuments;

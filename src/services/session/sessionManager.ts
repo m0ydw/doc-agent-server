@@ -43,7 +43,7 @@ function startSessionCleanup(): void {
       console.log(
         `[SessionManager] Closing idle session: ${session.sessionId}`,
       );
-      void closeDocument(session.doc);
+      void closeDocument(session.doc, `idle-timeout:${docId}`);
       sessions.delete(docId);
     }
   }, 60 * 1000);
@@ -138,10 +138,14 @@ export async function saveSessionDocument(
 ): Promise<{ saved: boolean; hash: string; docId: string }> {
   const session = sessions.get(docId);
   if (!session) {
+    console.log(`[SessionManager] Save without active session: ${docId}`);
     const result = await refreshSavedStateFromDisk(docId);
     return { saved: result.saved, hash: result.hash, docId };
   }
 
+  console.log(
+    `[SessionManager] Saving active session: ${session.sessionId} for ${docId}`,
+  );
   await session.doc.save({ inPlace: true });
   const result = await refreshSavedStateFromDisk(docId);
   session.lastActivity = Date.now();
@@ -170,25 +174,30 @@ export async function saveSessionDocuments(
   return results;
 }
 
-export async function closeSessionByDocId(docId: string): Promise<void> {
+export async function closeSessionByDocId(
+  docId: string,
+  reason = "unspecified",
+): Promise<void> {
   const session = sessions.get(docId);
   if (!session) {
-    console.log(`[SessionManager] No session found for ${docId}`);
+    console.log(`[SessionManager] No session found for ${docId}, reason=${reason}`);
     return;
   }
 
   console.log(
-    `[SessionManager] Closing session: ${session.sessionId} for ${docId}`,
+    `[SessionManager] Closing session: ${session.sessionId} for ${docId}, reason=${reason}`,
   );
-  await closeDocument(session.doc);
+  await closeDocument(session.doc, reason);
   sessions.delete(docId);
 }
 
-export async function closeAllSessions(): Promise<void> {
-  console.log(`[SessionManager] Closing all sessions: ${sessions.size}`);
+export async function closeAllSessions(reason = "unspecified"): Promise<void> {
+  console.log(
+    `[SessionManager] Closing all sessions: ${sessions.size}, reason=${reason}`,
+  );
 
   for (const docId of Array.from(sessions.keys())) {
-    await closeSessionByDocId(docId);
+    await closeSessionByDocId(docId, reason);
   }
 
   await disposeClient();

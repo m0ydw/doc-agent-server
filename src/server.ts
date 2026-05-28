@@ -1,15 +1,16 @@
-// 主入口文件：组装所有子系统并启动服务
+﻿// 主入口文件：组装所有子系统并启动服务
 // 启动顺序：Express HTTP → 文件清理策略 → 初始化 → 协作服务
 // 注意：协作服务使用独立端口（COLLAB_WS_PORT），不与 HTTP 端口冲突
 
 import express from "express";
 import { WebSocketServer } from "ws";
-import { SuperDocCollaboration } from "@superdoc-dev/superdoc-yjs-collaboration";
+import { CollaborationBuilder } from "@superdoc-dev/superdoc-yjs-collaboration";
 import config from "./config";
 import app, { logger } from "./app";
 import docRoutes from "./routes/docRoutes";
 import docOperationsRoutes from "./routes/docOperationsRoutes";
 import { UPLOAD_DIR } from "./services/docServices";
+import { loadCollabState, saveCollabState } from "./services/collabStateService";
 import { requiresAuth } from "./middleware/auth";
 /**
  * 【新增】导入 Agent WebSocket 模块
@@ -165,10 +166,24 @@ void initFileRegistry();
 // SuperDoc Yjs 协作服务 — 使用独立端口，通过 y-websocket 协议
 // 选择独立端口的原因：避免与 HTTP 冲突，且便于单独扩展
 // 前端编辑器通过此服务与 SDK Agent 共享同一份 Yjs 文档数据
-const collaborationService = new SuperDocCollaboration({
-  name: "doc-agent-collab",
-  debounce: 500,  // 500ms 防抖：合并短时间内多次编辑，减少同步请求频率
-});
+const collaborationService = new CollaborationBuilder()
+  .withName("doc-agent-collab")
+  .withDebounce(500)
+  .withDocumentExpiryMs(30 * 60 * 1000)
+  .onLoad(async ({ documentId }) => {
+    const state = await loadCollabState(documentId);
+    if (state) {
+      logger.info(
+        `[Collab] loaded persisted state room=${documentId} bytes=${state.byteLength}`,
+      );
+    }
+    return state;
+  })
+  .onAutoSave(async (params) => {
+    await saveCollabState(params);
+    logger.info(`[Collab] autosaved room=${params.documentId}`);
+  })
+  .build();
 
 const wss = new WebSocketServer({ port: config.COLLAB_WS_PORT });
 
@@ -177,6 +192,14 @@ const wss = new WebSocketServer({ port: config.COLLAB_WS_PORT });
 wss.on("connection", (ws, req) => {
   // URL 格式: ws://host:port/roomName，slice(1) 去掉开头的 "/"
   const roomName = req.url?.slice(1) || "default";
+  ws.on("close", (code, reason) => {
+    logger.info(
+      `[Collab] socket closed room=${roomName} code=${code} reason=${reason.toString()}`,
+    );
+  });
+  ws.on("error", (error) => {
+    logger.error(`[Collab] socket error room=${roomName}: ${error.message}`);
+  });
   logger.info(`[Collab] 新连接: ${roomName}`);
 
   // 将连接交给 SuperDocCollaboration 管理，自动处理 Yjs 同步与冲突解决

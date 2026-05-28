@@ -18,6 +18,7 @@ import {
 } from "../services/docServices";
 import * as sessionManager from "../services/session";
 import { registerDocument, unregisterDocument, initFileRegistry } from "../services/fileRegistry";
+import { cleanupCollabStates, deleteCollabState, hasCollabState } from "../services/collabStateService";
 
 const router: Router = express.Router();
 const COLLAB_WS_URL = config.COLLAB_WS_URL;
@@ -51,7 +52,10 @@ function getParamId(req: Request): string {
 
 // 为文档元数据附加协作房间信息 — 前端编辑器需要 roomName/wsUrl 来连接协作服务
 // 如果 metadata 中已有 roomName 则使用已有值，否则用 docId 作为默认房间名
-function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: string; wsUrl: string }) {
+function withCollaboration(
+  document: DocumentMetadata,
+  roomInfo?: { roomName: string; wsUrl: string; hasPersistedState?: boolean },
+) {
   const roomName = roomInfo?.roomName || document.roomName || document.id;
   const wsUrl = roomInfo?.wsUrl || COLLAB_WS_URL;
 
@@ -62,6 +66,7 @@ function withCollaboration(document: DocumentMetadata, roomInfo?: { roomName: st
       docId: document.id,
       roomName,
       wsUrl,
+      hasPersistedState: Boolean(roomInfo?.hasPersistedState),
     },
   };
 }
@@ -76,8 +81,9 @@ router.post("/cleanup", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "keepIds 必须是数组" });
     }
     // 清理前必须先关闭所有会话，释放 SDK 文件句柄
-    await sessionManager.closeAllSessions();
+    await sessionManager.closeAllSessions("cleanup");
     const deleted = await cleanupDocuments(keepIds);
+    await cleanupCollabStates(keepIds);
     // 重新扫描 uploads 目录重建注册表，保证后续操作的数据一致性
     await initFileRegistry();
     res.json({ success: true, message: "清理完成", deleted: deleted });
@@ -104,6 +110,29 @@ router.post("/:id/save", rawDocxBody, async (req: Request, res: Response) => {
   } catch (error) {
     console.error("保存文档失败:", error);
     res.status(500).json({ success: false, error: "保存文档失败" });
+  }
+});
+
+router.post("/:id/save-session", async (req: Request, res: Response) => {
+  try {
+    const id = getParamId(req);
+    await sessionManager.createOrUseSession(id);
+    const result = await sessionManager.saveSessionDocument(id);
+    const document = await getDocumentById(id);
+
+    if (!document) {
+      return res.status(404).json({ success: false, error: "æ–‡ä»¶ä¸å­˜åœ¨" });
+    }
+
+    res.json({
+      success: true,
+      saved: result.saved,
+      hash: result.hash,
+      document: withCollaboration(document),
+    });
+  } catch (error) {
+    console.error("ä¿å­˜åä½œä¼šè¯æ–‡æ¡£å¤±è´¥:", error);
+    res.status(500).json({ success: false, error: "ä¿å­˜åä½œä¼šè¯æ–‡æ¡£å¤±è´¥" });
   }
 });
 
@@ -226,10 +255,11 @@ router.post("/:id/open", async (req: Request, res: Response) => {
     }
 
     const roomInfo = await sessionManager.ensureYjsRoom(id);
+    const hasPersistedState = await hasCollabState(roomInfo.roomName);
 
     res.json({
       success: true,
-      document: withCollaboration(document, roomInfo),
+      document: withCollaboration(document, { ...roomInfo, hasPersistedState }),
       backend: {
         httpBaseUrl: "http://localhost:" + config.PORT,
       },
@@ -302,7 +332,10 @@ router.delete("/:id", async (req: Request, res: Response) => {
     const document = await getDocumentById(id);
 
     // 关闭 SDK 会话 — 必须先释放句柄再删文件
-    await sessionManager.closeSessionByDocId(id);
+    await sessionManager.closeSessionByDocId(id, "delete");
+    if (document) {
+      await deleteCollabState(document.roomName || document.id);
+    }
 
     // 从全局注册表移除，防止 Agent 引用已不存在的文档
     unregisterDocument(id);

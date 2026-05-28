@@ -124,10 +124,13 @@ export type RoomSessionResult = {
 };
 
 // closeDocument — 关闭文档句柄，释放 SDK 资源
-async function closeDocument(doc: RoomDocument | null): Promise<void> {
+async function closeDocument(
+  doc: RoomDocument | null,
+  reason = "unspecified",
+): Promise<void> {
   if (doc) {
     await doc.close();
-    console.log("[SDK] Document closed");
+    console.log(`[SDK] Document closed reason=${reason}`);
   }
 }
 
