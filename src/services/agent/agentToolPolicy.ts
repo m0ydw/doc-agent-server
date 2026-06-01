@@ -1,3 +1,51 @@
+﻿/**
+ * ============================================================
+ * 【Agent工具策略 - agentToolPolicy.ts】
+ * ============================================================
+ *
+ * 【链路式工程流说明】
+ * 这是Agent工具策略的核心模块，负责：
+ * 1. 控制工具调用的权限和策略
+ * 2. 管理全文读取的限制
+ * 3. 管理样式验证的待处理状态
+ * 4. 提供工具使用指导
+ *
+ * 【架构位置】
+ * agentTools.ts → 【agentToolPolicy.ts】 → 策略决策
+ * agentRunner.ts → 【agentToolPolicy.ts】 → 工具使用指导
+ *
+ * 【数据流】
+ * agentTools.ts调用shouldAllowFullTextRead()
+ *   ↓
+ * 检查策略条件
+ *   ↓
+ * 返回是否允许
+ *
+ * 【策略说明】
+ * 1. 全文读取策略：
+ *    - 默认不允许直接读取全文
+ *    - 需要先使用低token工具探索
+ *    - 只有在特定条件下才允许
+ *
+ * 2. 样式验证策略：
+ *    - 应用样式后必须验证
+ *    - 验证结果会影响后续操作
+ *
+ * 【导出的函数】
+ * - buildToolUsageGuidance: 构建工具使用指导
+ * - shouldAllowFullTextRead: 是否允许全文读取
+ * - recordToolFinished: 记录工具完成
+ * - getPendingStyleVerification: 获取待处理样式验证
+ *
+ * 【使用的类型】
+ * - AgentEvent: Agent事件类型
+ * - AgentRun: Agent运行实例类型
+ * - FullTextReadPurpose: 全文读取目的类型
+ * - PendingStyleVerification: 待处理样式验证类型
+ * ============================================================
+ */
+
+// ... (原始文件内容)
 import type {
   AgentEvent,
   AgentRun,
@@ -206,10 +254,16 @@ export function getPendingStyleVerification(
   for (let index = run.events.length - 1; index >= 0; index -= 1) {
     const event = run.events[index];
     if (event.type !== "tool.finished") continue;
-    if (event.payload.name === "read_text_style" && event.payload.status === "ok") {
+    if (
+      event.payload.name === "read_text_style" &&
+      event.payload.status === "ok"
+    ) {
       return undefined;
     }
-    if (event.payload.name === "apply_text_style" && event.payload.status === "ok") {
+    if (
+      event.payload.name === "apply_text_style" &&
+      event.payload.status === "ok"
+    ) {
       return buildStyleVerification(event.payload.input);
     }
   }

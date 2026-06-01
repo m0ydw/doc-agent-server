@@ -1,3 +1,52 @@
+﻿/**
+ * ============================================================
+ * 【文件注册表 - fileRegistry.ts】
+ * ============================================================
+ *
+ * 【链路式工程流说明】
+ * 这是文件注册表的核心模块，负责：
+ * 1. 维护所有已上传文档的ID/路径/名称映射
+ * 2. 供AI Agent查询和定位文档
+ * 3. 设计为内存中的单例Map
+ * 4. 配合磁盘元数据完成双向索引
+ *
+ * 【架构位置】
+ * docRoutes.ts → 【fileRegistry.ts】 → 内存Map
+ * agentTools.ts → 【fileRegistry.ts】 → 内存Map
+ *
+ * 【数据流】
+ * 服务启动 → initFileRegistry() → 扫描uploads目录
+ *   ↓
+ * 文档上传 → registerDocument() → 注册到Map
+ *   ↓
+ * Agent查询 → getDocumentBy...() → 从Map获取
+ *   ↓
+ * 文档删除 → unregisterDocument() → 从Map移除
+ *
+ * 【注册时机】
+ * - 服务启动扫描（initFileRegistry）
+ * - 文档上传（registerDocument）
+ *
+ * 【注销时机】
+ * - 文档删除（unregisterDocument）
+ *
+ * 【导出的函数】
+ * - fileRegistry: 全局单例实例
+ * - initFileRegistry: 初始化文件注册表
+ * - registerDocument: 注册单个文档
+ * - unregisterDocument: 注销单个文档
+ * - getDocumentByOriginalName: 根据原始名称获取文档
+ * - getDocumentByStoredName: 根据存储名称获取文档
+ * - getDocumentByRoomName: 根据房间名称获取文档
+ *
+ * 【使用的模块】
+ * ./docServices: 文档服务
+ *   - getDocumentList: 获取文档列表
+ *   - DocumentMetadata: 文档元数据类型
+ * ============================================================
+ */
+
+// ... (原始文件内容)
 // 文件映射表（FileRegistry）— 全局文档注册表
 // 核心作用：维护所有已上传文档的 ID/路径/名称映射，供 AI Agent 查询和定位文档
 // 设计为内存中的单例 Map，配合磁盘元数据完成双向索引
@@ -22,7 +71,9 @@ class FileRegistry {
    */
   register(entry: DocRegistryEntry): void {
     this.docs.set(entry.docId, entry);
-    console.log(`[FileRegistry] 注册文档: ${entry.originalName} (${entry.docId})`);
+    console.log(
+      `[FileRegistry] 注册文档: ${entry.originalName} (${entry.docId})`,
+    );
   }
 
   /**

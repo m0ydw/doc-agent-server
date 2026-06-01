@@ -1,3 +1,79 @@
+﻿/**
+ * ============================================================
+ * 【格式操作模块 - formatOperations.ts】
+ * ============================================================
+ *
+ * 【链路式工程流说明】
+ * 这是格式操作的核心模块，负责：
+ * 1. 文本设置（setText）
+ * 2. 格式应用（applyFormat）
+ * 3. 表格操作（inspectDocumentStructure、readTableContent等）
+ * 4. 文本块操作（inspectTextBlocks、readTextBlock等）
+ * 5. 文本样式操作（readTextStyle、applyTextStyle等）
+ * 6. 单元格写入和验证（writeCellsText、verifyCells）
+ *
+ * 【架构位置】
+ * editor/index.ts → 【formatOperations.ts】 → sessionManager → SDK
+ *
+ * 【数据流】
+ * 路由调用formatOperations.setText()
+ *   ↓
+ * getSession()获取文档句柄
+ *   ↓
+ * SDK执行操作
+ *   ↓
+ * 返回操作结果
+ *
+ * 【SDK调用方式】
+ * - doc.query.match: 查找文本
+ * - doc.mutations.apply: 应用变更
+ * - doc.tables.*: 表格操作
+ * - doc.blocks.*: 块操作
+ * - doc.format.*: 格式操作
+ * - doc.getNodeById: 获取节点
+ * - doc.insert: 插入内容
+ *
+ * 【导出的函数分类】
+ *
+ * 1. 文本操作：
+ *    - setText: 设置文本
+ *    - applyFormat: 应用格式
+ *
+ * 2. 表格操作：
+ *    - inspectDocumentStructure: 获取文档结构
+ *    - readTableContent: 读取表格内容
+ *    - readTableCellText: 读取单元格文本
+ *    - readTableStyle: 读取表格样式
+ *    - applyTableFormat: 应用表格格式
+ *
+ * 3. 文本块操作：
+ *    - inspectTextBlocks: 检查文本块
+ *    - readTextBlock: 读取文本块
+ *    - insertTextAtBlockOffset: 在指定位置插入文本
+ *
+ * 4. 文本样式操作：
+ *    - findTextTargets: 查找文本目标
+ *    - readTextStyle: 读取文本样式
+ *    - applyTextStyle: 应用文本样式
+ *    - extractApplicableTextStyle: 提取可应用的文本样式
+ *
+ * 5. 单元格操作：
+ *    - writeCellsText: 批量写入单元格
+ *    - verifyCells: 验证单元格
+ *
+ * 【使用的模块】
+ * sessionManager: 会话管理器
+ *   - createOrUseSession: 创建或使用会话
+ *
+ * @superdoc-dev/sdk: SuperDoc SDK
+ *   - dispatchSuperDocTool: 分发SuperDoc工具
+ * ============================================================
+ */
+
+import * as sessionManager from "../../services/session";
+import { dispatchSuperDocTool } from "@superdoc-dev/sdk";
+
+// ... (原始文件内容)
 import * as sessionManager from "../../services/session";
 import { dispatchSuperDocTool } from "@superdoc-dev/sdk";
 
@@ -791,7 +867,9 @@ function summarizeRunGroups(runs: unknown[]): Array<{
     groups.set(key, {
       count: 1,
       sampleText: isRecord(source) ? safePreview(source.text, 20) : "",
-      styles: isRecord(source) ? source.styles ?? summarizeRunStyle(source) : null,
+      styles: isRecord(source)
+        ? (source.styles ?? summarizeRunStyle(source))
+        : null,
     });
   }
 
@@ -1396,7 +1474,8 @@ export async function readTextStyle(
           const range = isRecord(block.range) ? block.range : {};
           const rangeStart =
             typeof range.start === "number" ? range.start : undefined;
-          const rangeEnd = typeof range.end === "number" ? range.end : undefined;
+          const rangeEnd =
+            typeof range.end === "number" ? range.end : undefined;
           const matchCoversFullBlock =
             fullTextLength != null &&
             rangeStart === 0 &&
@@ -1535,7 +1614,9 @@ function extractInlineStyleFromRun(run: unknown): Record<string, unknown> {
   };
 }
 
-function extractParagraphStyleFromBlock(block: unknown): Record<string, unknown> {
+function extractParagraphStyleFromBlock(
+  block: unknown,
+): Record<string, unknown> {
   const source = firstRecord(block);
   const paragraphStyle = firstRecord(source?.paragraphStyle);
   if (!paragraphStyle) return {};
@@ -1601,7 +1682,11 @@ export function extractApplicableTextStyle(readTextStyleResult: unknown): {
         ? (firstRecord(block?.paragraphStyle)?.styleId as string)
         : undefined;
 
-  if (!Object.keys(inline).length && !Object.keys(paragraph).length && !paragraphStyleId) {
+  if (
+    !Object.keys(inline).length &&
+    !Object.keys(paragraph).length &&
+    !paragraphStyleId
+  ) {
     return {
       success: false,
       reason: "No applicable text or paragraph style fields were found.",

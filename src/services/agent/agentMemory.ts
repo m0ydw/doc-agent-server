@@ -1,3 +1,61 @@
+﻿/**
+ * ============================================================
+ * 【Agent记忆模块 - agentMemory.ts】
+ * ============================================================
+ *
+ * 【链路式工程流说明】
+ * 这是Agent记忆的核心模块，负责：
+ * 1. 管理Agent的历史记忆
+ * 2. 持久化存储用户偏好和任务总结
+ * 3. 提供相关记忆的检索
+ * 4. 生成记忆摘要供Agent参考
+ *
+ * 【架构位置】
+ * agentRunner.ts → 【agentMemory.ts】 → 文件系统
+ *
+ * 【数据流】
+ * agentRunner调用persistRunMemory()
+ *   ↓
+ * 提取任务总结
+ *   ↓
+ * 写入memory.jsonl文件
+ *
+ * agentRunner调用summarizeRelevantMemory()
+ *   ↓
+ * 读取相关记忆
+ *   ↓
+ * 生成摘要供Agent参考
+ *
+ * 【存储格式】
+ * 使用JSONL格式（每行一个JSON对象）
+ * 存储在data/agent-memory/memory.jsonl文件中
+ *
+ * 【记忆类型】
+ * - user_preference: 用户偏好
+ * - document_task_summary: 文档任务总结
+ * - tool_call_summary: 工具调用总结
+ *
+ * 【导出的函数】
+ * - loadAgentMemory: 加载Agent记忆
+ * - persistRunMemory: 持久化运行记忆
+ * - summarizeRelevantMemory: 总结相关记忆
+ *
+ * 【使用的模块】
+ * fs/promises: Node.js文件系统模块（Promise版本）
+ *   - mkdir: 创建目录
+ *   - readFile: 读取文件
+ *   - appendFile: 追加文件
+ *
+ * path: Node.js路径模块
+ *   - 路径处理
+ *
+ * ./agentTypes: Agent类型定义
+ *   - AgentEvent: Agent事件类型
+ *   - AgentRun: Agent运行实例类型
+ * ============================================================
+ */
+
+// ... (原始文件内容)
 import { mkdir, readFile, appendFile } from "fs/promises";
 import path from "path";
 import type { AgentEvent, AgentRun } from "./agentTypes";
@@ -111,13 +169,20 @@ function compactToolEvent(event: AgentEvent): string | null {
 }
 
 function extractPreference(prompt: string): string | null {
-  if (!/(记住|以后|后续|默认|偏好|总是|每次|不要全文|先定位|样式.*检查)/.test(prompt)) {
+  if (
+    !/(记住|以后|后续|默认|偏好|总是|每次|不要全文|先定位|样式.*检查)/.test(
+      prompt,
+    )
+  ) {
     return null;
   }
   return `用户偏好/约束：${prompt}`;
 }
 
-export async function persistRunMemory(run: AgentRun, finalText: string): Promise<void> {
+export async function persistRunMemory(
+  run: AgentRun,
+  finalText: string,
+): Promise<void> {
   const documentNames = run.documents.map((doc) => doc.name);
   const preference = extractPreference(run.prompt);
   if (preference) {

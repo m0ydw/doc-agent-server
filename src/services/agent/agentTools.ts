@@ -1,3 +1,110 @@
+﻿/**
+ * ============================================================
+ * 【Agent工具定义 - agentTools.ts】
+ * ============================================================
+ *
+ * 【链路式工程流说明】
+ * 这是Agent工具定义的核心模块，负责：
+ * 1. 定义Agent可以调用的所有工具
+ * 2. 创建工具执行函数
+ * 3. 处理工具调用的权限和审批
+ * 4. 与SuperDoc SDK集成
+ *
+ * 【架构位置】
+ * agentRunner.ts → 【agentTools.ts】 → editor模块 → SDK
+ *
+ * 【数据流】
+ * AgentRunner调用createAgentTools()
+ *   ↓
+ * 创建工具集合
+ *   ↓
+ * LLM调用工具
+ *   ↓
+ * 工具执行函数处理
+ *   ↓
+ * 返回工具结果
+ *
+ * 【工具分类】
+ * 1. 文档操作工具：
+ *    - get_text: 获取纯文本
+ *    - create_document: 创建新文档
+ *    - find_text: 查找文本
+ *    - replace_text: 替换文本
+ *
+ * 2. 表格操作工具：
+ *    - inspect_document_tables: 检查文档中的表格
+ *    - inspect_table_structure: 检查表格结构
+ *    - read_cell_text: 读取单元格文本
+ *    - write_cells_text: 写入单元格文本
+ *    - verify_cells: 验证单元格
+ *
+ * 3. 文本块操作工具：
+ *    - inspect_text_blocks: 检查文本块
+ *    - read_text_block: 读取文本块
+ *    - insert_text_at_block_offset: 在指定位置插入文本
+ *
+ * 4. 样式操作工具：
+ *    - read_text_style: 读取文本样式
+ *    - apply_text_style: 应用文本样式
+ *    - find_text_targets: 查找文本目标
+ *
+ * 5. 用户交互工具：
+ *    - ask_user: 询问用户
+ *    - finalAnswer: 完成任务
+ *
+ * 【使用的库】
+ * ai: Vercel AI SDK
+ *   - jsonSchema: JSON Schema工具
+ *   - tool: 工具定义函数
+ *
+ * @superdoc-dev/sdk: SuperDoc SDK
+ *   - chooseTools: 选择工具
+ *   - dispatchSuperDocTool: 分发SuperDoc工具
+ *   - getSystemPrompt: 获取系统提示
+ *   - getToolCatalog: 获取工具目录
+ *
+ * zod: Schema验证库
+ *   - z.object: 定义对象Schema
+ *
+ * ../editor: 编辑操作模块
+ *   - 各种编辑和格式操作函数
+ *
+ * ../session: 会话管理模块
+ *   - createOrUseSession: 创建或使用会话
+ *
+ * ../docServices: 文档服务
+ *   - createBlankDocument: 创建空白文档
+ *
+ * ../fileRegistry: 文件注册表
+ *   - registerDocument: 注册文档
+ *
+ * ./agentSessionManager: Agent会话管理器
+ *   - addPendingInput: 添加待处理输入
+ *   - addPendingApproval: 添加待处理审批
+ *   - waitForInputResult: 等待输入结果
+ *   - waitForApprovalResult: 等待审批结果
+ *
+ * ./agentTypes: Agent类型定义
+ *   - AgentCellWrite: Agent单元格写入类型
+ *   - AgentEvent: Agent事件类型
+ *   - AgentRun: Agent运行实例类型
+ *   - ApprovalItem: 审批项类型
+ *
+ * ./agentLogger: Agent日志
+ *   - logToolCall: 记录工具调用
+ *   - logToolInput: 记录工具输入
+ *   - logToolOutput: 记录工具输出
+ *   - logToolError: 记录工具错误
+ *
+ * ./agentToolPolicy: Agent工具策略
+ *   - getPendingStyleVerification: 获取待处理样式验证
+ *   - recordToolFinished: 记录工具完成
+ *   - shouldAllowFullTextRead: 是否允许全文读取
+ * ============================================================
+ */
+
+// ... (原始文件内容)
+
 import { jsonSchema, tool } from "ai";
 import {
   chooseTools,
@@ -91,7 +198,9 @@ function getSuperDocIntentToolResources(): Promise<SuperDocIntentToolResources> 
 
 const finalAnswerSchema = z.object({});
 
-function mutationOptionsForPermission(permissionMode: AgentRun["permissionMode"]) {
+function mutationOptionsForPermission(
+  permissionMode: AgentRun["permissionMode"],
+) {
   return permissionMode === "auto_tracked"
     ? ({ changeMode: "tracked" } as const)
     : undefined;
@@ -117,7 +226,10 @@ const replaceTextSchema = z.object({
     .describe("目标文档名称；不填则使用当前文档"),
   targetText: z.string().min(1).describe("要查找并替换的原文本"),
   replacement: z.string().describe("替换后的新文本"),
-  replaceAll: z.boolean().default(true).describe("true 替换全部匹配；false 只替换第一处"),
+  replaceAll: z
+    .boolean()
+    .default(true)
+    .describe("true 替换全部匹配；false 只替换第一处"),
   reason: z.string().optional().describe("为什么要做这次替换"),
 });
 
@@ -194,7 +306,10 @@ const inlineTextStyleSchema = z.object({
   italic: z.boolean().optional(),
   underline: underlineSchema.optional(),
   strike: z.boolean().optional(),
-  color: z.string().optional().describe("Text color, for example 000000 or #000000."),
+  color: z
+    .string()
+    .optional()
+    .describe("Text color, for example 000000 or #000000."),
   highlight: z.string().optional().describe("Highlight color."),
   fontSize: z.number().optional().describe("Font size in points."),
   fontFamily: z.string().optional(),
@@ -239,13 +354,41 @@ const textTargetSchema = z.object({
   pattern: z.string().min(1).describe("Text to search before styling."),
   mode: z.enum(["contains", "regex"]).optional(),
   caseSensitive: z.boolean().optional(),
-  nodeId: z.string().optional().describe("Optional block nodeId to narrow the match."),
-  nodeType: z.string().optional().describe("Optional node type for scoped matching, for example tableCell or paragraph."),
-  blockId: z.string().optional().describe("Optional blockId returned by find_text_targets."),
-  ref: z.string().optional().describe("Optional search ref returned by find_text_targets."),
-  withinNodeId: z.string().optional().describe("Optional container nodeId used with doc.query.match within."),
-  withinNodeType: z.string().optional().describe("Optional container nodeType used with within, for example tableCell."),
-  matchIndex: z.number().int().min(0).optional().describe("0-based index after filters; default 0."),
+  nodeId: z
+    .string()
+    .optional()
+    .describe("Optional block nodeId to narrow the match."),
+  nodeType: z
+    .string()
+    .optional()
+    .describe(
+      "Optional node type for scoped matching, for example tableCell or paragraph.",
+    ),
+  blockId: z
+    .string()
+    .optional()
+    .describe("Optional blockId returned by find_text_targets."),
+  ref: z
+    .string()
+    .optional()
+    .describe("Optional search ref returned by find_text_targets."),
+  withinNodeId: z
+    .string()
+    .optional()
+    .describe("Optional container nodeId used with doc.query.match within."),
+  withinNodeType: z
+    .string()
+    .optional()
+    .describe(
+      "Optional container nodeType used with within, for example tableCell.",
+    ),
+  matchIndex: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("0-based index after filters; default 0."),
+
   all: z.boolean().optional().describe("true applies to every filtered match."),
 });
 
@@ -306,7 +449,10 @@ const styleMappingSchema = z.object({
   targetRef: z.string().optional(),
   targetBlockId: z.string().optional(),
   targetMatchIndex: z.number().int().min(0).optional(),
-  targetStyleScope: z.enum(["match", "block", "container"]).default("block").optional(),
+  targetStyleScope: z
+    .enum(["match", "block", "container"])
+    .default("block")
+    .optional(),
   reason: z.string().optional(),
 });
 
@@ -427,12 +573,14 @@ function buildTransferQuery(
 function hasUsableTarget(query: Record<string, unknown>): boolean {
   return Boolean(
     typeof query.pattern === "string" &&
-      query.pattern.trim() &&
-      (query.pattern || query.ref || query.blockId),
+    query.pattern.trim() &&
+    (query.pattern || query.ref || query.blockId),
   );
 }
 
-function styleVerificationQueryFromInput(input: unknown): Record<string, unknown> {
+function styleVerificationQueryFromInput(
+  input: unknown,
+): Record<string, unknown> {
   const source = isRecord(input) ? input : {};
   const styleSource = isRecord(source.styleInput) ? source.styleInput : source;
   const {
@@ -539,7 +687,8 @@ function createSuperDocIntentTools(
               if (mutates && run.permissionMode === "read_only") {
                 return {
                   status: "blocked",
-                  summary: "read_only 模式下不能执行会修改文档的 SuperDoc 工具。",
+                  summary:
+                    "read_only 模式下不能执行会修改文档的 SuperDoc 工具。",
                   detail: { toolName, input },
                 };
               }
@@ -589,31 +738,40 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         "Call this exactly once when all required tool work is complete. Do not call while style verification is pending. This is only a signal; do not include the final answer here. After this tool returns, write the final answer as normal text.",
       inputSchema: finalAnswerSchema,
       execute: async () =>
-        withToolEvents(emit, "finalAnswer", {}, async () => {
-          const pendingStyleVerification = getPendingStyleVerification(run);
-          if (pendingStyleVerification) {
+        withToolEvents(
+          emit,
+          "finalAnswer",
+          {},
+          async () => {
+            const pendingStyleVerification = getPendingStyleVerification(run);
+            if (pendingStyleVerification) {
+              return {
+                status: "blocked",
+                summary:
+                  "样式写入后仍需验证。请先按 detail.verificationQuery 调用 read_text_style，确认 block/runs 覆盖范围后再结束。",
+                detail: {
+                  verificationQuery: pendingStyleVerification.query,
+                  documentName: pendingStyleVerification.documentName,
+                },
+              };
+            }
             return {
-              status: "blocked",
-              summary:
-                "样式写入后仍需验证。请先按 detail.verificationQuery 调用 read_text_style，确认 block/runs 覆盖范围后再结束。",
-              detail: {
-                verificationQuery: pendingStyleVerification.query,
-                documentName: pendingStyleVerification.documentName,
-              },
+              status: "ok",
+              summary: "Ready for final text response.",
             };
-          }
-          return {
-            status: "ok",
-            summary: "Ready for final text response.",
-          };
-        }, run),
+          },
+          run,
+        ),
     }),
 
     ask_user: tool({
       description:
         "Ask the user for missing information that materially affects document writing. Use before guessing mappings, style choices, or ambiguous edit targets.",
       inputSchema: askUserSchema,
-      execute: async ({ question, reason, expectedAnswerType, choices }, options) =>
+      execute: async (
+        { question, reason, expectedAnswerType, choices },
+        options,
+      ) =>
         withToolEvents(
           emit,
           "ask_user",
@@ -722,26 +880,45 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         pattern: z.string().min(1).describe("要查找的文本"),
       }),
       execute: async ({ documentName, pattern }) =>
-        withToolEvents(emit, "find_text", { documentName, pattern }, async () => {
-          const doc = requireDocument(run, documentName);
-          const matches = await editor.findText(doc.id, pattern);
-          return {
-            status: "ok",
-            summary: `在《${doc.name}》中找到 ${matches.length} 处“${pattern}”。`,
-            detail: { documentName: doc.name, pattern, count: matches.length, matches },
-          };
-        }),
+        withToolEvents(
+          emit,
+          "find_text",
+          { documentName, pattern },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const matches = await editor.findText(doc.id, pattern);
+            return {
+              status: "ok",
+              summary: `在《${doc.name}》中找到 ${matches.length} 处“${pattern}”。`,
+              detail: {
+                documentName: doc.name,
+                pattern,
+                count: matches.length,
+                matches,
+              },
+            };
+          },
+        ),
     }),
 
     replace_text: tool({
       description:
         "查找并替换 DOCX 文本。会根据权限模式阻塞、发起审批、以修订模式替换或直接替换。替换前会先查找匹配项。",
       inputSchema: replaceTextSchema,
-      execute: async ({ documentName, targetText, replacement, replaceAll, reason }, options) =>
+      execute: async (
+        { documentName, targetText, replacement, replaceAll, reason },
+        options,
+      ) =>
         withToolEvents(
           emit,
           "replace_text",
-          { documentName, targetText, replacement, replaceAll, permissionMode: run.permissionMode },
+          {
+            documentName,
+            targetText,
+            replacement,
+            replaceAll,
+            permissionMode: run.permissionMode,
+          },
           async () => {
             const doc = requireDocument(run, documentName);
             if (run.permissionMode === "read_only") {
@@ -758,7 +935,13 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               return {
                 status: "ok",
                 summary: `未在《${doc.name}》中找到“${targetText}”，没有修改文档。`,
-                detail: { documentName: doc.name, targetText, replacement, count: 0, matches: [] },
+                detail: {
+                  documentName: doc.name,
+                  targetText,
+                  replacement,
+                  count: 0,
+                  matches: [],
+                },
               };
             }
 
@@ -782,7 +965,9 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 approvalId: approval.approvalId,
                 items: approval.items,
               });
-              const resolution = await waitForApprovalResult(approval.approvalId);
+              const resolution = await waitForApprovalResult(
+                approval.approvalId,
+              );
               return {
                 status: "ok",
                 summary: `替换审批已处理：批准 ${resolution.approvedCount} 项，拒绝 ${resolution.rejectedCount} 项。`,
@@ -800,7 +985,9 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               })),
               mutationOptionsForPermission(run.permissionMode),
             );
-            const successful = replaceResult.filter((item) => item.success).length;
+            const successful = replaceResult.filter(
+              (item) => item.success,
+            ).length;
             const saveResult =
               successful > 0
                 ? await saveMutatedDocument(doc.id, "replace_text")
@@ -831,17 +1018,22 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         documentName: z.string().optional(),
       }),
       execute: async ({ documentName }) =>
-        withToolEvents(emit, "inspect_document_tables", { documentName }, async () => {
-          const doc = requireDocument(run, documentName);
-          const result = parseJsonResult(
-            await editor.inspectDocumentStructure(doc.id),
-          );
-          return {
-            status: "ok",
-            summary: `已读取《${doc.name}》所有表格概览：${toSummaryText(result)}`,
-            detail: result,
-          };
-        }),
+        withToolEvents(
+          emit,
+          "inspect_document_tables",
+          { documentName },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.inspectDocumentStructure(doc.id),
+            );
+            return {
+              status: "ok",
+              summary: `已读取《${doc.name}》所有表格概览：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
     }),
 
     inspect_table_structure: tool({
@@ -877,15 +1069,20 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         ref: z.string().min(1),
       }),
       execute: async ({ documentName, ref }) =>
-        withToolEvents(emit, "read_cell_text", { documentName, ref }, async () => {
-          const doc = requireDocument(run, documentName);
-          const text = await editor.readTableCellText(doc.id, ref);
-          return {
-            status: "ok",
-            summary: `已读取《${doc.name}》目标单元格，长度 ${text.length} 字符。`,
-            detail: { ref, text },
-          };
-        }),
+        withToolEvents(
+          emit,
+          "read_cell_text",
+          { documentName, ref },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const text = await editor.readTableCellText(doc.id, ref);
+            return {
+              status: "ok",
+              summary: `已读取《${doc.name}》目标单元格，长度 ${text.length} 字符。`,
+              detail: { ref, text },
+            };
+          },
+        ),
     }),
 
     read_table_style: tool({
@@ -959,7 +1156,13 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         previewLimit: z.number().default(20),
         nodeTypes: z.array(z.string()).optional(),
       }),
-      execute: async ({ documentName, offset, limit, previewLimit, nodeTypes }) =>
+      execute: async ({
+        documentName,
+        offset,
+        limit,
+        previewLimit,
+        nodeTypes,
+      }) =>
         withToolEvents(
           emit,
           "inspect_text_blocks",
@@ -991,15 +1194,22 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         ref: z.string().min(1),
       }),
       execute: async ({ documentName, ref }) =>
-        withToolEvents(emit, "read_text_block", { documentName, ref }, async () => {
-          const doc = requireDocument(run, documentName);
-          const result = parseJsonResult(await editor.readTextBlock(doc.id, ref));
-          return {
-            status: "ok",
-            summary: `已读取 ${doc.name} 的文本块：${toSummaryText(result)}`,
-            detail: result,
-          };
-        }),
+        withToolEvents(
+          emit,
+          "read_text_block",
+          { documentName, ref },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = parseJsonResult(
+              await editor.readTextBlock(doc.id, ref),
+            );
+            return {
+              status: "ok",
+              summary: `已读取 ${doc.name} 的文本块：${toSummaryText(result)}`,
+              detail: result,
+            };
+          },
+        ),
     }),
 
     find_text_targets: tool({
@@ -1152,7 +1362,10 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
             for (const [index, mapping] of mappings.entries()) {
               const sourceQuery = buildTransferQuery(mapping, "source");
               const targetQuery = buildTransferQuery(mapping, "target");
-              if (!hasUsableTarget(sourceQuery) || !hasUsableTarget(targetQuery)) {
+              if (
+                !hasUsableTarget(sourceQuery) ||
+                !hasUsableTarget(targetQuery)
+              ) {
                 results.push({
                   index,
                   success: false,
@@ -1244,7 +1457,13 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         withToolEvents(
           emit,
           "insert_text_at_block_offset",
-          { documentName, ref, offset, text, permissionMode: run.permissionMode },
+          {
+            documentName,
+            ref,
+            offset,
+            text,
+            permissionMode: run.permissionMode,
+          },
           async () => {
             const doc = requireDocument(run, documentName);
             if (run.permissionMode === "read_only") {
@@ -1350,7 +1569,9 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
                 approvalId: approval.approvalId,
                 items: approval.items,
               });
-              const resolution = await waitForApprovalResult(approval.approvalId);
+              const resolution = await waitForApprovalResult(
+                approval.approvalId,
+              );
               return {
                 status: "ok",
                 summary: `写入审批已处理：批准 ${resolution.approvedCount} 项，拒绝 ${resolution.rejectedCount} 项。`,
@@ -1358,20 +1579,26 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
               };
             }
 
-            const mutationOptions = mutationOptionsForPermission(run.permissionMode);
+            const mutationOptions = mutationOptionsForPermission(
+              run.permissionMode,
+            );
             const writeResult = await editor.writeCellsText(
               doc.id,
               cells,
               mutationOptions,
             );
-            const successCount = writeResult.filter((item) => item.success).length;
+            const successCount = writeResult.filter(
+              (item) => item.success,
+            ).length;
             const saveResult =
               successCount > 0
                 ? await saveMutatedDocument(doc.id, "write_cells_text")
                 : null;
             if (run.permissionMode === "auto_tracked") {
               return {
-                status: writeResult.every((item) => item.success) ? "ok" : "error",
+                status: writeResult.every((item) => item.success)
+                  ? "ok"
+                  : "error",
                 summary: `已以修订模式写入 ${successCount} 个单元格，等待前端审阅 UI 接受或拒绝。`,
                 detail: {
                   changeMode: "tracked",
@@ -1398,15 +1625,20 @@ export async function createAgentTools(run: AgentRun, emit: EmitAgentEvent) {
         cells: z.array(cellWriteSchema).min(1),
       }),
       execute: async ({ documentName, cells }) =>
-        withToolEvents(emit, "verify_cells", { documentName, cells }, async () => {
-          const doc = requireDocument(run, documentName);
-          const result = await editor.verifyCells(doc.id, cells);
-          return {
-            status: "ok",
-            summary: `已验证 ${result.length} 个单元格，匹配 ${result.filter((item) => item.matched).length} 个。`,
-            detail: result,
-          };
-        }),
+        withToolEvents(
+          emit,
+          "verify_cells",
+          { documentName, cells },
+          async () => {
+            const doc = requireDocument(run, documentName);
+            const result = await editor.verifyCells(doc.id, cells);
+            return {
+              status: "ok",
+              summary: `已验证 ${result.length} 个单元格，匹配 ${result.filter((item) => item.matched).length} 个。`,
+              detail: result,
+            };
+          },
+        ),
     }),
   };
 }
